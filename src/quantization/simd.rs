@@ -438,7 +438,7 @@ use std::arch::x86_64::*;
 
 /// Horizontal sum of 8 f32 values in a __m256 register.
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx2")]
 unsafe fn hsum_f32x8(v: __m256) -> f32 {
     let hi128 = _mm256_extractf128_ps(v, 1);
@@ -567,7 +567,7 @@ unsafe fn avx2_dot_product_f32(a: &[f32], b: &[f32]) -> f32 {
 
 /// AVX2 helper: load 8 u8 values, convert to __m256 f32, dequantize.
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
+#[inline]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn avx2_u8x8_to_f32_deq(ptr: *const u8, min_vec: __m256, scale_vec: __m256) -> __m256 {
     let u8x8 = _mm_loadl_epi64(ptr as *const __m128i);
