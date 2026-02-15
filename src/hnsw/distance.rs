@@ -39,14 +39,12 @@ impl DistanceMetric {
     /// More accurate than symmetric u8-vs-u8 since the query keeps full f32 precision.
     pub fn distance_asym(&self, query: &[f32], stored: VectorRef<'_>) -> f32 {
         match self {
-            DistanceMetric::Cosine => {
-                1.0 - crate::quantization::scalar::cosine_similarity_asym(query, stored)
-            }
+            DistanceMetric::Cosine => 1.0 - crate::quantization::simd::cosine_asym(query, stored),
             DistanceMetric::Euclidean => {
-                crate::quantization::scalar::euclidean_distance_sq_asym(query, stored)
+                crate::quantization::simd::euclidean_sq_asym(query, stored)
             }
             DistanceMetric::DotProduct => {
-                -crate::quantization::scalar::dot_product_asym(query, stored)
+                -crate::quantization::simd::dot_product_asym(query, stored)
             }
         }
     }
@@ -54,36 +52,9 @@ impl DistanceMetric {
     /// Exact f32-vs-f32 distance for reranking. No quantization loss.
     pub fn distance_exact(&self, a: &[f32], b: &[f32]) -> f32 {
         match self {
-            DistanceMetric::Cosine => {
-                let mut dot = 0.0f32;
-                let mut norm_a = 0.0f32;
-                let mut norm_b = 0.0f32;
-                for i in 0..a.len() {
-                    dot += a[i] * b[i];
-                    norm_a += a[i] * a[i];
-                    norm_b += b[i] * b[i];
-                }
-                let denom = norm_a.sqrt() * norm_b.sqrt();
-                if denom < 1e-10 {
-                    return 1.0;
-                }
-                1.0 - dot / denom
-            }
-            DistanceMetric::Euclidean => {
-                let mut sum = 0.0f32;
-                for i in 0..a.len() {
-                    let d = a[i] - b[i];
-                    sum += d * d;
-                }
-                sum
-            }
-            DistanceMetric::DotProduct => {
-                let mut sum = 0.0f32;
-                for i in 0..a.len() {
-                    sum += a[i] * b[i];
-                }
-                -sum
-            }
+            DistanceMetric::Cosine => 1.0 - crate::quantization::simd::cosine_f32(a, b),
+            DistanceMetric::Euclidean => crate::quantization::simd::euclidean_sq_f32(a, b),
+            DistanceMetric::DotProduct => -crate::quantization::simd::dot_product_f32(a, b),
         }
     }
 
@@ -98,17 +69,13 @@ impl DistanceMetric {
     ) -> f32 {
         match self {
             DistanceMetric::Cosine => {
-                1.0 - crate::quantization::scalar::cosine_similarity_asym_prenorm(
-                    query,
-                    stored,
-                    query_norm_sq,
-                )
+                1.0 - crate::quantization::simd::cosine_asym_prenorm(query, stored, query_norm_sq)
             }
             DistanceMetric::Euclidean => {
-                crate::quantization::scalar::euclidean_distance_sq_asym(query, stored)
+                crate::quantization::simd::euclidean_sq_asym(query, stored)
             }
             DistanceMetric::DotProduct => {
-                -crate::quantization::scalar::dot_product_asym(query, stored)
+                -crate::quantization::simd::dot_product_asym(query, stored)
             }
         }
     }

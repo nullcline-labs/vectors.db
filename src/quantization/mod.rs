@@ -6,5 +6,7 @@
 
 /// Scalar quantization: f32 → u8 with min/scale calibration and distance functions.
 pub mod scalar;
+/// SIMD-accelerated distance functions (NEON / AVX2 / scalar fallback).
+pub mod simd;
 
 pub use scalar::{QuantizedVector, VectorRef};

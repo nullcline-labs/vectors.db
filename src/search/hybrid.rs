@@ -37,10 +37,7 @@ pub fn rrf_fusion(
             heap.pop();
         }
     }
-    let mut results: Vec<(u32, f32)> = heap
-        .into_iter()
-        .map(|Reverse((s, id))| (id, s.0))
-        .collect();
+    let mut results: Vec<(u32, f32)> = heap.into_iter().map(|Reverse((s, id))| (id, s.0)).collect();
     results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results
 }
@@ -90,10 +87,7 @@ pub fn linear_fusion(
             heap.pop();
         }
     }
-    let mut results: Vec<(u32, f32)> = heap
-        .into_iter()
-        .map(|Reverse((s, id))| (id, s.0))
-        .collect();
+    let mut results: Vec<(u32, f32)> = heap.into_iter().map(|Reverse((s, id))| (id, s.0)).collect();
     results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results
 }
