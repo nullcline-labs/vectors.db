@@ -618,7 +618,7 @@ impl VectorDB {
 // ---------------------------------------------------------------------------
 
 #[pymodule]
-fn vectorsdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _vectorsdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VectorDB>()?;
     m.add_class::<SearchResult>()?;
     m.add_class::<CollectionInfo>()?;

@@ -18,4 +18,5 @@ classifiers = [
 
 [tool.maturin]
 manifest-path = "Cargo.toml"
-module-name = "vectorsdb"
+module-name = "vectorsdb._vectorsdb"
+python-source = "python"

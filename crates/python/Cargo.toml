@@ -5,7 +5,7 @@ edition.workspace = true
 description = "Python bindings for vectors.db"
 
 [lib]
-name = "vectorsdb"
+name = "_vectorsdb"
 crate-type = ["cdylib"]
 
 [dependencies]
