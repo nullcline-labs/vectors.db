@@ -63,6 +63,24 @@ pub struct HnswIndex {
     pub node_count: u32,
 }
 
+/// Portable software prefetch hint (L1 cache, read).
+/// No-op on unsupported platforms.
+#[inline(always)]
+fn prefetch_read(ptr: *const u8) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!(
+            "prfm pldl1keep, [{ptr}]",
+            ptr = in(reg) ptr,
+            options(nostack, preserves_flags)
+        );
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
+    }
+}
+
 impl HnswIndex {
     /// Creates a new empty HNSW index with the given dimension and configuration.
     pub fn new(dimension: usize, config: HnswConfig) -> Self {
@@ -156,6 +174,25 @@ impl HnswIndex {
             true
         } else {
             false
+        }
+    }
+
+    /// Prefetch quantized vector data for a node (u8 arena + min/scale metadata).
+    #[inline(always)]
+    pub fn prefetch_vector(&self, id: u32) {
+        let start = id as usize * self.dimension;
+        if start < self.vector_data.len() {
+            prefetch_read(unsafe { self.vector_data.as_ptr().add(start) });
+            prefetch_read(unsafe { self.vector_min.as_ptr().add(id as usize) as *const u8 });
+        }
+    }
+
+    /// Prefetch raw f32 vector data for a node (for reranking / exact distance).
+    #[inline(always)]
+    pub fn prefetch_raw_vector(&self, id: u32) {
+        let start = id as usize * self.dimension;
+        if start < self.raw_vectors.len() {
+            prefetch_read(unsafe { self.raw_vectors.as_ptr().add(start) as *const u8 });
         }
     }
 }

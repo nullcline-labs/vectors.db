@@ -128,7 +128,20 @@ pub fn search_layer<F: Fn(u32) -> bool>(
             continue;
         }
 
-        for &neighbor_id in &index.neighbors[node_id][layer] {
+        let neighbor_list = &index.neighbors[node_id][layer];
+        for i in 0..neighbor_list.len() {
+            let neighbor_id = neighbor_list[i];
+
+            // Prefetch next neighbor's vector data while processing current
+            if i + 1 < neighbor_list.len() {
+                let next_id = neighbor_list[i + 1];
+                if exact {
+                    index.prefetch_raw_vector(next_id);
+                } else {
+                    index.prefetch_vector(next_id);
+                }
+            }
+
             if !visited.insert(neighbor_id) {
                 continue;
             }
@@ -226,9 +239,12 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
     );
 
     // Rerank all candidates using exact f32 distances (no quantization loss)
-    for item in results.iter_mut() {
-        let raw = index.get_raw_vector(item.1);
-        item.0 = index.config.distance_metric.distance_exact(query, raw);
+    for i in 0..results.len() {
+        if i + 1 < results.len() {
+            index.prefetch_raw_vector(results[i + 1].1);
+        }
+        let raw = index.get_raw_vector(results[i].1);
+        results[i].0 = index.config.distance_metric.distance_exact(query, raw);
     }
     results.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
