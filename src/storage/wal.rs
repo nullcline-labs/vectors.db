@@ -34,9 +34,7 @@ pub enum WalEntry {
         config: HnswConfig,
     },
     /// Delete a collection by name.
-    DeleteCollection {
-        name: String,
-    },
+    DeleteCollection { name: String },
     /// Insert a single document with its embedding.
     InsertDocument {
         collection_name: String,
@@ -150,9 +148,7 @@ impl WriteAheadLog {
                 result_tx,
             })
             .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "WAL batch writer stopped")
-            })?;
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL batch writer stopped"))?;
 
         result_rx
             .await

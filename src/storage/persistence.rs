@@ -43,8 +43,12 @@ pub fn load_collection(path: &Path) -> io::Result<Collection> {
     let data: CollectionData = bincode::deserialize(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    data.validate()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("snapshot validation failed: {}", e)))?;
+    data.validate().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("snapshot validation failed: {}", e),
+        )
+    })?;
 
     tracing::info!(
         "Loaded collection '{}' ({} documents)",

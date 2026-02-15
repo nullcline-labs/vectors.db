@@ -1326,7 +1326,10 @@ async fn test_security_headers_present() {
         "nosniff"
     );
     assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
-    assert_eq!(resp.headers().get("referrer-policy").unwrap(), "no-referrer");
+    assert_eq!(
+        resp.headers().get("referrer-policy").unwrap(),
+        "no-referrer"
+    );
 }
 
 #[tokio::test]
@@ -1514,8 +1517,7 @@ async fn test_clear_collection() {
     assert_eq!(body["count"], 0);
 
     // Collection still exists and accepts inserts
-    let resp =
-        insert_test_document(&base_url, "clr_col", "new doc", vec![1.0, 0.0, 0.0]).await;
+    let resp = insert_test_document(&base_url, "clr_col", "new doc", vec![1.0, 0.0, 0.0]).await;
     assert_eq!(resp.status(), 200);
 }
 

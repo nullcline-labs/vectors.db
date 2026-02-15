@@ -44,24 +44,21 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
-            ApiError::Redirect(location) => {
-                match axum::http::HeaderValue::from_str(&location) {
-                    Ok(val) => {
-                        let mut resp = (
-                            StatusCode::TEMPORARY_REDIRECT,
-                            axum::Json(json!({ "redirect": location })),
-                        )
-                            .into_response();
-                        resp.headers_mut()
-                            .insert(axum::http::header::LOCATION, val);
-                        resp
-                    }
-                    Err(_) => {
-                        let body = axum::Json(json!({ "error": "Invalid redirect location" }));
-                        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
-                    }
+            ApiError::Redirect(location) => match axum::http::HeaderValue::from_str(&location) {
+                Ok(val) => {
+                    let mut resp = (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        axum::Json(json!({ "redirect": location })),
+                    )
+                        .into_response();
+                    resp.headers_mut().insert(axum::http::header::LOCATION, val);
+                    resp
                 }
-            }
+                Err(_) => {
+                    let body = axum::Json(json!({ "error": "Invalid redirect location" }));
+                    (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+                }
+            },
             other => {
                 let (status, message) = match other {
                     ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),

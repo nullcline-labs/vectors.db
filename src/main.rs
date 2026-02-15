@@ -141,8 +141,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         key
     };
 
-    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-        .install_recorder()?;
+    let prometheus_handle =
+        metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
     let max_memory_bytes = args.max_memory_mb * 1024 * 1024;
 
@@ -283,8 +283,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match (args.tls_cert, args.tls_key) {
         (Some(cert), Some(key)) => {
             tracing::info!("TLS enabled");
-            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
-                .await?;
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await?;
             let handle = axum_server::Handle::new();
             let shutdown_handle = handle.clone();
             tokio::spawn(async move {
@@ -324,10 +324,7 @@ fn parse_rbac_config() -> Option<RbacConfig> {
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!(
-                    "Error: VECTORS_DB_API_KEYS contains invalid JSON: {}",
-                    e
-                );
+                eprintln!("Error: VECTORS_DB_API_KEYS contains invalid JSON: {}", e);
                 std::process::exit(1);
             }
         }

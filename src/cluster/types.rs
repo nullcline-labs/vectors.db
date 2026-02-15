@@ -34,9 +34,7 @@ pub enum LogEntry {
         config: HnswConfig,
     },
     /// Delete a collection by name.
-    DeleteCollection {
-        name: String,
-    },
+    DeleteCollection { name: String },
     /// Insert a single document with its embedding into a collection.
     InsertDocument {
         collection_name: String,

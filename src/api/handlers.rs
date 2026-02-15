@@ -101,9 +101,7 @@ fn validate_collection_name(name: &str) -> Result<(), ApiError> {
 /// `GET /health` — returns server status, version, and operational metrics.
 ///
 /// Returns HTTP 200 when healthy, 503 when degraded (memory usage >= 90% of limit).
-pub async fn health(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<HealthResponse>) {
+pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     let collections = state.db.collections.read();
     let collections_count = collections.len();
     let total_documents: usize = collections.values().map(|c| c.document_count()).sum();
@@ -115,8 +113,7 @@ pub async fn health(
         .unwrap_or(0);
     let uptime = state.start_time.elapsed().as_secs();
 
-    let degraded = state.max_memory_bytes > 0
-        && memory_used >= state.max_memory_bytes * 9 / 10;
+    let degraded = state.max_memory_bytes > 0 && memory_used >= state.max_memory_bytes * 9 / 10;
 
     let status_code = if degraded {
         StatusCode::SERVICE_UNAVAILABLE
@@ -201,14 +198,10 @@ pub async fn create_collection(
     if state.raft.is_some() {
         raft_write_or_wal(&state, raft_entry, &wal_entry).await?;
     } else {
-        state
-            .wal
-            .append(&wal_entry)
-            .await
-            .map_err(|e| {
-                tracing::error!("WAL append failed: {}", e);
-                ApiError::Internal("Write failed".into())
-            })?;
+        state.wal.append(&wal_entry).await.map_err(|e| {
+            tracing::error!("WAL append failed: {}", e);
+            ApiError::Internal("Write failed".into())
+        })?;
         state
             .db
             .create_collection(req.name.clone(), req.dimension, Some(config_hnsw.clone()))
@@ -260,14 +253,10 @@ pub async fn delete_collection(
             message: format!("Collection '{}' deleted", name),
         }))
     } else {
-        state
-            .wal
-            .append(&wal_entry)
-            .await
-            .map_err(|e| {
-                tracing::error!("WAL append failed: {}", e);
-                ApiError::Internal("Write failed".into())
-            })?;
+        state.wal.append(&wal_entry).await.map_err(|e| {
+            tracing::error!("WAL append failed: {}", e);
+            ApiError::Internal("Write failed".into())
+        })?;
         if state.db.delete_collection(&name) {
             metrics::record_write_operation(&name, "drop");
             tracing::info!(collection = %name, "Collection deleted");
@@ -345,14 +334,10 @@ pub async fn insert_document(
         tracing::info!(collection = %name, doc_id = %doc.id, "Document inserted");
         Ok(Json(InsertResponse { id: doc.id }))
     } else {
-        state
-            .wal
-            .append(&wal_entry)
-            .await
-            .map_err(|e| {
-                tracing::error!("WAL append failed: {}", e);
-                ApiError::Internal("Write failed".into())
-            })?;
+        state.wal.append(&wal_entry).await.map_err(|e| {
+            tracing::error!("WAL append failed: {}", e);
+            ApiError::Internal("Write failed".into())
+        })?;
         let id = collection.insert_document(doc, req.embedding);
         metrics::record_write_operation(&name, "insert");
         tracing::info!(collection = %name, doc_id = %id, "Document inserted");
@@ -460,14 +445,10 @@ pub async fn batch_insert_documents(
         tracing::info!(collection = %name, count = inserted, "Batch inserted");
         Ok(Json(BatchInsertResponse { ids, inserted }))
     } else {
-        state
-            .wal
-            .append(&wal_entry)
-            .await
-            .map_err(|e| {
-                tracing::error!("WAL append failed: {}", e);
-                ApiError::Internal("Write failed".into())
-            })?;
+        state.wal.append(&wal_entry).await.map_err(|e| {
+            tracing::error!("WAL append failed: {}", e);
+            ApiError::Internal("Write failed".into())
+        })?;
         let ids: Vec<Uuid> = docs
             .into_iter()
             .map(|(doc, embedding)| collection.insert_document(doc, embedding))
@@ -530,14 +511,10 @@ pub async fn delete_document(
             message: format!("Document '{}' deleted", id),
         }))
     } else {
-        state
-            .wal
-            .append(&wal_entry)
-            .await
-            .map_err(|e| {
-                tracing::error!("WAL append failed: {}", e);
-                ApiError::Internal("Write failed".into())
-            })?;
+        state.wal.append(&wal_entry).await.map_err(|e| {
+            tracing::error!("WAL append failed: {}", e);
+            ApiError::Internal("Write failed".into())
+        })?;
         if collection.delete_document(&id) {
             metrics::record_write_operation(&name, "delete");
             tracing::info!(collection = %name, doc_id = %id, "Document deleted");
@@ -627,14 +604,10 @@ pub async fn update_document(
     if state.raft.is_some() {
         raft_write_or_wal(&state, raft_entry, &wal_entry).await?;
     } else {
-        state
-            .wal
-            .append(&wal_entry)
-            .await
-            .map_err(|e| {
-                tracing::error!("WAL append failed: {}", e);
-                ApiError::Internal("Write failed".into())
-            })?;
+        state.wal.append(&wal_entry).await.map_err(|e| {
+            tracing::error!("WAL append failed: {}", e);
+            ApiError::Internal("Write failed".into())
+        })?;
         collection.delete_document(&id);
         collection.insert_document(new_doc, new_embedding);
     }
@@ -787,11 +760,10 @@ pub async fn save(
         .get_collection(&name)
         .ok_or_else(|| ApiError::NotFound(format!("Collection '{}' not found", name)))?;
 
-    save_collection(&collection, &state.data_dir)
-        .map_err(|e| {
-            tracing::error!("Failed to save collection: {}", e);
-            ApiError::Internal("Save operation failed".into())
-        })?;
+    save_collection(&collection, &state.data_dir).map_err(|e| {
+        tracing::error!("Failed to save collection: {}", e);
+        ApiError::Internal("Save operation failed".into())
+    })?;
 
     Ok(Json(MessageResponse {
         message: format!("Collection '{}' saved", name),
@@ -811,11 +783,10 @@ pub async fn load(
         )));
     }
 
-    let collection = crate::storage::load_collection(&path)
-        .map_err(|e| {
-            tracing::error!("Failed to load collection: {}", e);
-            ApiError::Internal("Load operation failed".into())
-        })?;
+    let collection = crate::storage::load_collection(&path).map_err(|e| {
+        tracing::error!("Failed to load collection: {}", e);
+        ApiError::Internal("Load operation failed".into())
+    })?;
 
     let mut collections = state.db.collections.write();
     collections.insert(name.clone(), collection);
@@ -833,22 +804,18 @@ pub async fn compact(State(state): State<AppState>) -> Result<Json<MessageRespon
     let _gate = state.wal.freeze();
     let collections = state.db.collections.read();
     for (name, collection) in collections.iter() {
-        save_collection(collection, &state.data_dir)
-            .map_err(|e| {
-                tracing::error!("Failed to save '{}': {}", name, e);
-                ApiError::Internal("Save operation failed".into())
-            })?;
+        save_collection(collection, &state.data_dir).map_err(|e| {
+            tracing::error!("Failed to save '{}': {}", name, e);
+            ApiError::Internal("Save operation failed".into())
+        })?;
     }
     let count = collections.len();
     drop(collections);
 
-    state
-        .wal
-        .truncate()
-        .map_err(|e| {
-            tracing::error!("Failed to truncate WAL: {}", e);
-            ApiError::Internal("Compaction failed".into())
-        })?;
+    state.wal.truncate().map_err(|e| {
+        tracing::error!("Failed to truncate WAL: {}", e);
+        ApiError::Internal("Compaction failed".into())
+    })?;
 
     Ok(Json(MessageResponse {
         message: format!("Compaction complete, {} collections saved", count),
@@ -900,14 +867,10 @@ async fn raft_write_or_wal(
             }
         }
     } else {
-        state
-            .wal
-            .append(wal_entry)
-            .await
-            .map_err(|e| {
-                tracing::error!("WAL append failed: {}", e);
-                ApiError::Internal("Write failed".into())
-            })?;
+        state.wal.append(wal_entry).await.map_err(|e| {
+            tracing::error!("WAL append failed: {}", e);
+            ApiError::Internal("Write failed".into())
+        })?;
         Ok(())
     }
 }
@@ -981,11 +944,10 @@ pub async fn backup(State(state): State<AppState>) -> Result<Json<BackupResponse
     let collections = state.db.collections.read();
     let mut files = Vec::new();
     for (name, collection) in collections.iter() {
-        save_collection(collection, &state.data_dir)
-            .map_err(|e| {
-                tracing::error!("Failed to save '{}': {}", name, e);
-                ApiError::Internal("Save operation failed".into())
-            })?;
+        save_collection(collection, &state.data_dir).map_err(|e| {
+            tracing::error!("Failed to save '{}': {}", name, e);
+            ApiError::Internal("Save operation failed".into())
+        })?;
         files.push(format!("{}.vdb", name));
     }
     Ok(Json(BackupResponse {
@@ -1096,11 +1058,10 @@ pub async fn clear_collection(
 
 /// `POST /admin/restore` — loads all `.vdb` files from the data directory into memory.
 pub async fn restore_all(State(state): State<AppState>) -> Result<Json<RestoreResponse>, ApiError> {
-    let loaded = crate::storage::load_all_collections(&state.data_dir)
-        .map_err(|e| {
-            tracing::error!("Failed to load collections: {}", e);
-            ApiError::Internal("Restore operation failed".into())
-        })?;
+    let loaded = crate::storage::load_all_collections(&state.data_dir).map_err(|e| {
+        tracing::error!("Failed to load collections: {}", e);
+        ApiError::Internal("Restore operation failed".into())
+    })?;
 
     let count = loaded.len();
     let mut collections = state.db.collections.write();

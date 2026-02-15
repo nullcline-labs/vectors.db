@@ -153,10 +153,7 @@ impl CollectionData {
         // Entry point must be in bounds
         if let Some(ep) = self.hnsw_index.entry_point {
             if ep as usize >= nc {
-                return Err(format!(
-                    "entry_point {} >= node_count {}",
-                    ep, nc
-                ));
+                return Err(format!("entry_point {} >= node_count {}", ep, nc));
             }
         }
 
