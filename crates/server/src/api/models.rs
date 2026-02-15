@@ -11,9 +11,7 @@ use vectorsdb_core::document::MetadataValue;
 pub use vectorsdb_core::filter_types::*;
 
 /// Convert JSON metadata (from API requests) to core MetadataValue.
-pub fn json_to_metadata(
-    map: HashMap<String, serde_json::Value>,
-) -> HashMap<String, MetadataValue> {
+pub fn json_to_metadata(map: HashMap<String, serde_json::Value>) -> HashMap<String, MetadataValue> {
     map.into_iter()
         .filter_map(|(k, v)| {
             let mv = match v {

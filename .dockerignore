@@ -1,5 +1,17 @@
 target/
 .git/
-benchmarks/data/
-*.md
+.cargo/
 .github/
+.claude/
+benchmarks/data/
+examples/
+*.md
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyd
+*.so
+.pytest_cache/
+.venv/
+crates/python/
