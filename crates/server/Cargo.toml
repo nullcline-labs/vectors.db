@@ -1,0 +1,51 @@
+[package]
+name = "vectorsdb-server"
+version.workspace = true
+edition.workspace = true
+description = "HTTP server for vectors.db"
+
+[[bin]]
+name = "vectors-db"
+path = "src/main.rs"
+
+[dependencies]
+vectorsdb-core = { path = "../core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+axum-server = { workspace = true }
+openraft = { workspace = true }
+reqwest = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+subtle = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+bincode = { workspace = true }
+crc32fast = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+
+[[bench]]
+name = "ann_glove25"
+harness = false
+
+[[bench]]
+name = "ann_sift128"
+harness = false
+
+[[bench]]
+name = "ann_glove100"
+harness = false
+
+[[bench]]
+name = "bm25_nfcorpus"
+harness = false

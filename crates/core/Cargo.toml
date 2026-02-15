@@ -1,0 +1,16 @@
+[package]
+name = "vectorsdb-core"
+version.workspace = true
+edition.workspace = true
+description = "Core library for vectors.db — HNSW, BM25, hybrid search, embeddable"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+uuid = { workspace = true }
+ordered-float = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+crc32fast = { workspace = true }
