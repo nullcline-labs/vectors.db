@@ -2,9 +2,8 @@
 FROM rust:1.83-slim AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
-COPY benches/ benches/
-RUN cargo build --release
+COPY crates/ crates/
+RUN cargo build --release -p vectorsdb-server
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

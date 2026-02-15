@@ -23,20 +23,62 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 
 ## Quick Start
 
-### From source
+### Python library
+
+```bash
+pip install maturin
+cd crates/python && maturin develop --release
+```
+
+```python
+import vectorsdb
+
+db = vectorsdb.VectorDB()
+db.create_collection("docs", dimension=3)
+
+db.insert("docs", "hello world", [1.0, 0.0, 0.0], metadata={"tag": "greeting"})
+db.insert("docs", "goodbye moon", [0.0, 1.0, 0.0])
+
+# Vector search
+results = db.search("docs", query_embedding=[1.0, 0.0, 0.0], k=5)
+print(results[0].text)      # "hello world"
+print(results[0].score)     # 1.0
+print(results[0].metadata)  # {"tag": "greeting"}
+
+# Keyword search
+results = db.search("docs", query_text="moon", k=5)
+
+# Hybrid search (vector + keyword)
+results = db.search("docs", query_embedding=[1.0, 0.0, 0.0], query_text="hello", k=5)
+
+# Filtered search
+results = db.search("docs", query_embedding=[1.0, 0.0, 0.0], k=5, filter={
+    "must": [{"field": "tag", "op": "eq", "value": "greeting"}]
+})
+
+# Persistence
+db.save("docs", path="./data")
+db.load("docs", path="./data")
+```
+
+Full IDE autocomplete and type hints are included via PEP 561 stubs. See [`examples/`](examples/) for more usage patterns.
+
+### REST server
+
+#### From source
 
 ```bash
 cargo run --release -- --port 3030 --data-dir ./data
 ```
 
-### Docker
+#### Docker
 
 ```bash
 docker build -t vectors-db .
 docker run -p 3030:3030 -v vectors-data:/data vectors-db
 ```
 
-### First steps
+#### First steps
 
 ```bash
 # Create a collection
