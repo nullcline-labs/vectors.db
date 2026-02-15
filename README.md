@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" width="128" height="128" alt="vectors.db icon">
+</p>
+
 # vectors.db
 
 A lightweight, in-memory vector database with HNSW indexing, BM25 full-text search, and hybrid retrieval.
