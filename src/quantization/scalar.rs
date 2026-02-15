@@ -182,43 +182,127 @@ pub fn cosine_similarity_ref(a: VectorRef<'_>, b: VectorRef<'_>) -> f32 {
     (real_dot / denom) as f32
 }
 
-/// Squared Euclidean distance on VectorRefs with SIMD-friendly chunking.
+/// Squared Euclidean distance on VectorRefs with SIMD-friendly i32 chunked accumulation.
+/// Expands `sum((a_min + ai*a_scale - b_min - bi*b_scale)^2)` into integer accumulators
+/// for auto-vectorization, then reconstructs the f64 result from closed-form sums.
 pub fn euclidean_distance_sq_ref(a: VectorRef<'_>, b: VectorRef<'_>) -> f32 {
     debug_assert_eq!(a.data.len(), b.data.len());
 
     let len = a.data.len();
+    let mut sum_a = 0i64;
+    let mut sum_b = 0i64;
+    let mut sum_a2 = 0i64;
+    let mut sum_b2 = 0i64;
+    let mut sum_ab = 0i64;
+
+    let full_chunks = len / CHUNK;
+    for c in 0..full_chunks {
+        let base = c * CHUNK;
+        let mut csa = 0i32;
+        let mut csb = 0i32;
+        let mut csa2 = 0i32;
+        let mut csb2 = 0i32;
+        let mut csab = 0i32;
+
+        for j in 0..CHUNK {
+            let ai = a.data[base + j] as i32;
+            let bi = b.data[base + j] as i32;
+            csa += ai;
+            csb += bi;
+            csa2 += ai * ai;
+            csb2 += bi * bi;
+            csab += ai * bi;
+        }
+
+        sum_a += csa as i64;
+        sum_b += csb as i64;
+        sum_a2 += csa2 as i64;
+        sum_b2 += csb2 as i64;
+        sum_ab += csab as i64;
+    }
+
+    for i in (full_chunks * CHUNK)..len {
+        let ai = a.data[i] as i64;
+        let bi = b.data[i] as i64;
+        sum_a += ai;
+        sum_b += bi;
+        sum_a2 += ai * ai;
+        sum_b2 += bi * bi;
+        sum_ab += ai * bi;
+    }
+
+    let n = len as f64;
     let a_scale = a.scale as f64;
     let b_scale = b.scale as f64;
     let a_min = a.min as f64;
     let b_min = b.min as f64;
+    let offset = a_min - b_min;
 
-    let mut sum = 0.0f64;
-    for i in 0..len {
-        let ai = a_min + a.data[i] as f64 * a_scale;
-        let bi = b_min + b.data[i] as f64 * b_scale;
-        let diff = ai - bi;
-        sum += diff * diff;
-    }
-    sum as f32
+    // sum((offset + ai*a_scale - bi*b_scale)^2)
+    // = n*offset^2 + 2*offset*(a_scale*sum_a - b_scale*sum_b)
+    //   + a_scale^2*sum_a2 - 2*a_scale*b_scale*sum_ab + b_scale^2*sum_b2
+    let result = n * offset * offset
+        + 2.0 * offset * (a_scale * sum_a as f64 - b_scale * sum_b as f64)
+        + a_scale * a_scale * sum_a2 as f64
+        - 2.0 * a_scale * b_scale * sum_ab as f64
+        + b_scale * b_scale * sum_b2 as f64;
+
+    result as f32
 }
 
-/// Dot product on VectorRefs with SIMD-friendly chunking.
+/// Dot product on VectorRefs with SIMD-friendly i32 chunked accumulation.
+/// Expands `sum((a_min + ai*a_scale) * (b_min + bi*b_scale))` into integer accumulators
+/// for auto-vectorization, then reconstructs the f64 result from closed-form sums.
 pub fn dot_product_ref(a: VectorRef<'_>, b: VectorRef<'_>) -> f32 {
     debug_assert_eq!(a.data.len(), b.data.len());
 
     let len = a.data.len();
+    let mut sum_a = 0i64;
+    let mut sum_b = 0i64;
+    let mut sum_ab = 0i64;
+
+    let full_chunks = len / CHUNK;
+    for c in 0..full_chunks {
+        let base = c * CHUNK;
+        let mut csa = 0i32;
+        let mut csb = 0i32;
+        let mut csab = 0i32;
+
+        for j in 0..CHUNK {
+            let ai = a.data[base + j] as i32;
+            let bi = b.data[base + j] as i32;
+            csa += ai;
+            csb += bi;
+            csab += ai * bi;
+        }
+
+        sum_a += csa as i64;
+        sum_b += csb as i64;
+        sum_ab += csab as i64;
+    }
+
+    for i in (full_chunks * CHUNK)..len {
+        let ai = a.data[i] as i64;
+        let bi = b.data[i] as i64;
+        sum_a += ai;
+        sum_b += bi;
+        sum_ab += ai * bi;
+    }
+
+    let n = len as f64;
     let a_scale = a.scale as f64;
     let b_scale = b.scale as f64;
     let a_min = a.min as f64;
     let b_min = b.min as f64;
 
-    let mut sum = 0.0f64;
-    for i in 0..len {
-        let ai = a_min + a.data[i] as f64 * a_scale;
-        let bi = b_min + b.data[i] as f64 * b_scale;
-        sum += ai * bi;
-    }
-    sum as f32
+    // sum((a_min + ai*a_scale) * (b_min + bi*b_scale))
+    // = n*a_min*b_min + a_min*b_scale*sum_b + b_min*a_scale*sum_a + a_scale*b_scale*sum_ab
+    let result = n * a_min * b_min
+        + a_min * b_scale * sum_b as f64
+        + b_min * a_scale * sum_a as f64
+        + a_scale * b_scale * sum_ab as f64;
+
+    result as f32
 }
 
 /// SIMD-friendly chunk size for f32 asymmetric loops.

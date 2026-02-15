@@ -189,7 +189,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
     // Allocate VisitedSet once, reuse across all layers
     let mut visited = VisitedSet::new(index.node_count as usize);
 
-    let mut current_entry_points = vec![entry_point];
+    let mut current_ep = entry_point;
 
     // Traverse from top layer down to layer 1, using ef=1 (quantized, fast)
     // Upper layers use no-op filter — filtering only matters at layer 0
@@ -198,7 +198,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         let results = search_layer(
             index,
             query,
-            &current_entry_points,
+            std::slice::from_ref(&current_ep),
             1,
             layer,
             &mut visited,
@@ -207,7 +207,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
             &no_filter,
         );
         if let Some(&(_, nearest)) = results.first() {
-            current_entry_points = vec![nearest];
+            current_ep = nearest;
         }
     }
 
@@ -216,7 +216,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
     let mut results = search_layer(
         index,
         query,
-        &current_entry_points,
+        std::slice::from_ref(&current_ep),
         ef,
         0,
         &mut visited,

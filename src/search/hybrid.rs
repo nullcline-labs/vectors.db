@@ -6,7 +6,9 @@
 //! - **Linear**: score-based combination with min-max normalization and alpha weighting
 
 use crate::config;
-use std::collections::HashMap;
+use ordered_float::OrderedFloat;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 /// Reciprocal Rank Fusion: combines ranked lists.
 /// score(d) = sum(1 / (k + rank_i(d)))
@@ -27,9 +29,19 @@ pub fn rrf_fusion(
         *scores.entry(*id).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
     }
 
-    let mut results: Vec<(u32, f32)> = scores.into_iter().collect();
+    // Partial sort: O(n log k) via min-heap of size k
+    let mut heap: BinaryHeap<Reverse<(OrderedFloat<f32>, u32)>> = BinaryHeap::with_capacity(k + 1);
+    for (id, score) in scores {
+        heap.push(Reverse((OrderedFloat(score), id)));
+        if heap.len() > k {
+            heap.pop();
+        }
+    }
+    let mut results: Vec<(u32, f32)> = heap
+        .into_iter()
+        .map(|Reverse((s, id))| (id, s.0))
+        .collect();
     results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(k);
     results
 }
 
@@ -70,9 +82,19 @@ pub fn linear_fusion(
         }
     }
 
-    let mut results: Vec<(u32, f32)> = scores.into_iter().collect();
+    // Partial sort: O(n log k) via min-heap of size k
+    let mut heap: BinaryHeap<Reverse<(OrderedFloat<f32>, u32)>> = BinaryHeap::with_capacity(k + 1);
+    for (id, score) in scores {
+        heap.push(Reverse((OrderedFloat(score), id)));
+        if heap.len() > k {
+            heap.pop();
+        }
+    }
+    let mut results: Vec<(u32, f32)> = heap
+        .into_iter()
+        .map(|Reverse((s, id))| (id, s.0))
+        .collect();
     results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(k);
     results
 }
 

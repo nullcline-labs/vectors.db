@@ -45,3 +45,7 @@ harness = false
 [[bench]]
 name = "bm25_nfcorpus"
 harness = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

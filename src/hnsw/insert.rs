@@ -37,7 +37,7 @@ impl HnswIndex {
         let entry_point = self
             .entry_point
             .expect("entry_point is Some after is_none() guard");
-        let mut current_entry_points = vec![entry_point];
+        let mut current_ep = entry_point;
 
         // Precompute query norm squared for this raw_vector
         let query_norm_sq: f32 = raw_vector.iter().map(|&x| x * x).sum();
@@ -52,7 +52,7 @@ impl HnswIndex {
             let results = search_layer(
                 self,
                 raw_vector,
-                &current_entry_points,
+                std::slice::from_ref(&current_ep),
                 1,
                 layer,
                 &mut visited,
@@ -61,7 +61,7 @@ impl HnswIndex {
                 &no_filter,
             );
             if let Some(&(_, nearest)) = results.first() {
-                current_entry_points = vec![nearest];
+                current_ep = nearest;
             }
         }
 
@@ -74,12 +74,13 @@ impl HnswIndex {
             node_neighbors.push(Vec::new());
         }
 
+        let mut layer_eps: Vec<u32> = vec![current_ep];
         for layer in (0..=top).rev() {
             let ef = self.config.ef_construction;
             let candidates = search_layer(
                 self,
                 raw_vector,
-                &current_entry_points,
+                &layer_eps,
                 ef,
                 layer,
                 &mut visited,
@@ -98,9 +99,10 @@ impl HnswIndex {
             node_neighbors[layer] = selected.iter().map(|&(_, id)| id).collect();
 
             // Update entry points for next (lower) layer
-            current_entry_points = candidates.iter().map(|&(_, id)| id).collect();
-            if current_entry_points.is_empty() {
-                current_entry_points = vec![entry_point];
+            layer_eps.clear();
+            layer_eps.extend(candidates.iter().map(|&(_, id)| id));
+            if layer_eps.is_empty() {
+                layer_eps.push(entry_point);
             }
         }
 

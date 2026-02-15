@@ -6,7 +6,9 @@
 use crate::bm25::inverted_index::InvertedIndex;
 use crate::bm25::tokenizer::tokenize;
 use crate::config;
-use std::collections::HashMap;
+use ordered_float::OrderedFloat;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 /// BM25 Okapi scoring for a query against the inverted index.
 /// Returns scored documents (internal_id, score) sorted by descending score.
@@ -21,7 +23,7 @@ pub fn bm25_search(index: &InvertedIndex, query: &str, k: usize) -> Vec<(u32, f3
     let k1 = config::BM25_K1;
     let b = config::BM25_B;
 
-    let mut scores: HashMap<u32, f32> = HashMap::with_capacity(index.doc_count as usize);
+    let mut scores: HashMap<u32, f32> = HashMap::with_capacity(256.min(index.doc_count as usize));
 
     for token in query_tokens.iter() {
         if let Some(postings) = index.index.get(token) {
@@ -46,8 +48,18 @@ pub fn bm25_search(index: &InvertedIndex, query: &str, k: usize) -> Vec<(u32, f3
         }
     }
 
-    let mut results: Vec<(u32, f32)> = scores.into_iter().collect();
+    // Partial sort: O(n log k) via min-heap of size k
+    let mut heap: BinaryHeap<Reverse<(OrderedFloat<f32>, u32)>> = BinaryHeap::with_capacity(k + 1);
+    for (id, score) in scores {
+        heap.push(Reverse((OrderedFloat(score), id)));
+        if heap.len() > k {
+            heap.pop();
+        }
+    }
+    let mut results: Vec<(u32, f32)> = heap
+        .into_iter()
+        .map(|Reverse((s, id))| (id, s.0))
+        .collect();
     results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(k);
     results
 }

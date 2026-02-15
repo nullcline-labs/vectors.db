@@ -5,23 +5,23 @@
 
 /// Generation-based visited set. Replaces `HashSet<u32>` with O(1) array indexing.
 /// Each `clear()` increments a generation counter; `insert()` compares against current generation.
-/// Only performs a full memset every 255 clears (on overflow).
+/// Uses u16 generation to reduce full memset frequency to every 65534 clears.
 pub struct VisitedSet {
-    data: Vec<u8>,
-    generation: u8,
+    data: Vec<u16>,
+    generation: u16,
 }
 
 impl VisitedSet {
     pub fn new(capacity: usize) -> Self {
         Self {
-            data: vec![0u8; capacity],
+            data: vec![0u16; capacity],
             generation: 1,
         }
     }
 
-    /// Reset the set. O(1) amortized — full memset only every 255 calls.
+    /// Reset the set. O(1) amortized — full memset only every 65534 calls.
     pub fn clear(&mut self) {
-        if self.generation == 255 {
+        if self.generation == u16::MAX {
             self.data.fill(0);
             self.generation = 1;
         } else {
@@ -68,11 +68,11 @@ mod tests {
     #[test]
     fn test_generation_overflow() {
         let mut vs = VisitedSet::new(10);
-        // Drive generation to 255 (start at 1, need 254 clears)
-        for _ in 0..254 {
+        // Drive generation to u16::MAX (start at 1, need 65534 clears)
+        for _ in 0..65534 {
             vs.clear();
         }
-        assert_eq!(vs.generation, 255);
+        assert_eq!(vs.generation, u16::MAX);
         vs.insert(5);
 
         // Next clear triggers memset and resets to 1
