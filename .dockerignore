@@ -1,0 +1,5 @@
+target/
+.git/
+benchmarks/data/
+*.md
+.github/

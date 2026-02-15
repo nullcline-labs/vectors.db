@@ -1,0 +1,213 @@
+//! HNSW insertion algorithm.
+//!
+//! Inserts a vector into the HNSW graph with bidirectional connections and
+//! heuristic neighbor pruning (Algorithm 4 from the HNSW paper).
+//! Uses exact f32 distances during construction for high-quality graph connectivity.
+
+use crate::hnsw::graph::HnswIndex;
+use crate::hnsw::search::search_layer;
+use crate::hnsw::visited::VisitedSet;
+use crate::quantization::QuantizedVector;
+
+impl HnswIndex {
+    /// Insert a new vector into the HNSW index (SoA layout).
+    /// Uses exact f32 distances for graph construction (high-quality connections).
+    /// Stores both the quantized vector (for fast search navigation) and the raw f32 vector.
+    /// internal_id must equal node_count before this call.
+    pub fn insert(&mut self, internal_id: u32, raw_vector: &[f32], vector: QuantizedVector) {
+        let level = self.random_level();
+
+        // First node — push SoA fields and return
+        if self.entry_point.is_none() {
+            self.push_vector(&vector);
+            self.push_raw_vector(raw_vector);
+            let mut layer_neighbors = Vec::with_capacity(level + 1);
+            for _ in 0..=level {
+                layer_neighbors.push(Vec::new());
+            }
+            self.neighbors.push(layer_neighbors);
+            self.layers.push(level as u8);
+            self.deleted.push(false);
+            self.node_count += 1;
+            self.entry_point = Some(internal_id);
+            self.max_layer = level;
+            return;
+        }
+
+        let entry_point = self
+            .entry_point
+            .expect("entry_point is Some after is_none() guard");
+        let mut current_entry_points = vec![entry_point];
+
+        // Precompute query norm squared for this raw_vector
+        let query_norm_sq: f32 = raw_vector.iter().map(|&x| x * x).sum();
+
+        // Allocate VisitedSet once, reuse across all search_layer calls
+        let mut visited = VisitedSet::new(self.node_count as usize);
+
+        // Phase 1: Greedily traverse from top layer down to node's level + 1
+        // Uses exact f32 distances for high-quality graph construction
+        let no_filter = |_: u32| true;
+        for layer in (level + 1..=self.max_layer).rev() {
+            let results = search_layer(
+                self,
+                raw_vector,
+                &current_entry_points,
+                1,
+                layer,
+                &mut visited,
+                query_norm_sq,
+                true,
+                &no_filter,
+            );
+            if let Some(&(_, nearest)) = results.first() {
+                current_entry_points = vec![nearest];
+            }
+        }
+
+        // Phase 2: Search each layer and collect neighbors for the new node.
+        // We collect all neighbor lists first, then push the node.
+        // Uses exact f32 distances for high-quality graph construction
+        let top = level.min(self.max_layer);
+        let mut node_neighbors: Vec<Vec<u32>> = Vec::with_capacity(level + 1);
+        for _ in 0..=level {
+            node_neighbors.push(Vec::new());
+        }
+
+        for layer in (0..=top).rev() {
+            let ef = self.config.ef_construction;
+            let candidates = search_layer(
+                self,
+                raw_vector,
+                &current_entry_points,
+                ef,
+                layer,
+                &mut visited,
+                query_norm_sq,
+                true,
+                &no_filter,
+            );
+
+            let m_max = if layer == 0 {
+                self.config.m_max0
+            } else {
+                self.config.m
+            };
+
+            let selected = select_neighbors_heuristic(self, &candidates, m_max);
+            node_neighbors[layer] = selected.iter().map(|&(_, id)| id).collect();
+
+            // Update entry points for next (lower) layer
+            current_entry_points = candidates.iter().map(|&(_, id)| id).collect();
+            if current_entry_points.is_empty() {
+                current_entry_points = vec![entry_point];
+            }
+        }
+
+        // Push the new node's SoA fields
+        self.push_vector(&vector);
+        self.push_raw_vector(raw_vector);
+        self.neighbors.push(node_neighbors);
+        self.layers.push(level as u8);
+        self.deleted.push(false);
+        self.node_count += 1;
+
+        // Phase 3: Add bidirectional connections and prune over-capacity neighbors
+        // Uses exact f32 distances for pruning decisions
+        for layer in 0..=top {
+            let m_max = if layer == 0 {
+                self.config.m_max0
+            } else {
+                self.config.m
+            };
+
+            let my_neighbors: Vec<u32> = self.neighbors[internal_id as usize][layer].clone();
+            for &neighbor_id in &my_neighbors {
+                let nid = neighbor_id as usize;
+
+                // Ensure neighbor has enough layer vecs
+                while self.neighbors[nid].len() <= layer {
+                    self.neighbors[nid].push(Vec::new());
+                }
+                self.neighbors[nid][layer].push(internal_id);
+
+                // Prune if over capacity — using exact f32 distances
+                if self.neighbors[nid][layer].len() > m_max {
+                    let neighbor_raw = self.get_raw_vector(neighbor_id);
+                    let neighbor_ids: Vec<u32> = self.neighbors[nid][layer].clone();
+                    let candidates: Vec<(f32, u32)> = neighbor_ids
+                        .iter()
+                        .map(|&cid| {
+                            let cid_raw = self.get_raw_vector(cid);
+                            let dist = self
+                                .config
+                                .distance_metric
+                                .distance_exact(cid_raw, neighbor_raw);
+                            (dist, cid)
+                        })
+                        .collect();
+                    let pruned = select_neighbors_heuristic(self, &candidates, m_max);
+                    self.neighbors[nid][layer] = pruned.iter().map(|&(_, id)| id).collect();
+                }
+            }
+        }
+
+        // Update entry point if new node has higher layer
+        if level > self.max_layer {
+            self.max_layer = level;
+            self.entry_point = Some(internal_id);
+        }
+    }
+}
+
+/// Heuristic neighbor selection (Algorithm 4 from the HNSW paper).
+/// Prefers diverse neighbors: a candidate is selected only if it is closer to the base node
+/// than to any already-selected neighbor. This avoids redundant clusters of near-identical
+/// neighbors and ensures better graph connectivity, especially for cosine distance.
+fn select_neighbors_heuristic(
+    index: &HnswIndex,
+    candidates: &[(f32, u32)],
+    m: usize,
+) -> Vec<(f32, u32)> {
+    let mut sorted = candidates.to_vec();
+    sorted.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut selected: Vec<(f32, u32)> = Vec::with_capacity(m);
+
+    for &(dist_to_base, cid) in &sorted {
+        if selected.len() >= m {
+            break;
+        }
+
+        // Check if this candidate is closer to base than to any already-selected neighbor
+        let cid_raw = index.get_raw_vector(cid);
+        let is_diverse = selected.iter().all(|&(_, sid)| {
+            let sid_raw = index.get_raw_vector(sid);
+            let dist_to_selected = index
+                .config
+                .distance_metric
+                .distance_exact(cid_raw, sid_raw);
+            dist_to_base <= dist_to_selected
+        });
+
+        if is_diverse {
+            selected.push((dist_to_base, cid));
+        }
+    }
+
+    // If heuristic didn't fill M slots, fill remaining with closest unused candidates
+    if selected.len() < m {
+        let selected_ids: std::collections::HashSet<u32> =
+            selected.iter().map(|&(_, id)| id).collect();
+        for &(dist, cid) in &sorted {
+            if selected.len() >= m {
+                break;
+            }
+            if !selected_ids.contains(&cid) {
+                selected.push((dist, cid));
+            }
+        }
+    }
+
+    selected
+}

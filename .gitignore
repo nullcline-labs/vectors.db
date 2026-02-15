@@ -1,0 +1,22 @@
+# Build
+/target/
+
+# Benchmark datasets (large binary files, download via benchmarks/convert_hdf5.py)
+benchmarks/data/*.bin
+benchmarks/data/*.hdf5
+benchmarks/data/nfcorpus/
+
+# Runtime data
+/data/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code
+.claude/

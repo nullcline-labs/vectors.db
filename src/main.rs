@@ -1,0 +1,527 @@
+use clap::Parser;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing_subscriber::EnvFilter;
+use vectors_db::api::create_router;
+use vectors_db::api::handlers::AppState;
+use vectors_db::api::metrics;
+use vectors_db::api::rbac::{ApiKeyEntry, RbacConfig};
+use vectors_db::cluster;
+use vectors_db::config;
+use vectors_db::storage::{
+    load_all_collections, save_collection, Database, WalEntry, WriteAheadLog,
+};
+
+#[derive(Parser)]
+#[command(name = "vectors-db", about = "In-memory vector database")]
+struct Args {
+    /// Port to listen on
+    #[arg(short, long, default_value_t = config::DEFAULT_PORT)]
+    port: u16,
+
+    /// Data directory for persistence
+    #[arg(short, long, default_value = config::DEFAULT_DATA_DIR)]
+    data_dir: String,
+
+    /// Maximum memory in MB (0 = unlimited)
+    #[arg(long, default_value_t = 0)]
+    max_memory_mb: usize,
+
+    /// Snapshot interval in seconds (0 = disabled)
+    #[arg(long, default_value_t = config::DEFAULT_SNAPSHOT_INTERVAL_SECS)]
+    snapshot_interval: u64,
+
+    /// TLS certificate file path
+    #[arg(long)]
+    tls_cert: Option<String>,
+
+    /// TLS private key file path
+    #[arg(long)]
+    tls_key: Option<String>,
+
+    /// Node ID for Raft cluster mode (omit for standalone)
+    #[arg(long)]
+    node_id: Option<u64>,
+
+    /// Comma-separated peer addresses (id=addr format, e.g. "2=host2:3030,3=host3:3030")
+    #[arg(long)]
+    peers: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("vectors_db=info".parse().expect("valid directive literal")),
+        )
+        .init();
+
+    let args = Args::parse();
+
+    // Validate CLI arguments early
+    if args.port == 0 {
+        eprintln!("Error: port must be > 0");
+        std::process::exit(1);
+    }
+    if args.max_memory_mb > 0 && args.max_memory_mb < 16 {
+        tracing::warn!(
+            "max_memory_mb={} is very low (minimum recommended: 16)",
+            args.max_memory_mb
+        );
+    }
+    let data_path = std::path::Path::new(&args.data_dir);
+    if data_path.exists() && !data_path.is_dir() {
+        eprintln!(
+            "Error: data_dir '{}' exists but is not a directory",
+            args.data_dir
+        );
+        std::process::exit(1);
+    }
+
+    let db = Database::new();
+
+    // Load existing collection snapshots from disk
+    match load_all_collections(&args.data_dir) {
+        Ok(collections) => {
+            let mut db_collections = db.collections.write();
+            for collection in collections {
+                let name = collection.data.read().name.clone();
+                tracing::info!("Restored collection '{}'", name);
+                db_collections.insert(name, collection);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Could not load collections: {}", e);
+        }
+    }
+
+    // Initialize WAL and replay pending entries
+    let wal = Arc::new(WriteAheadLog::new(&args.data_dir)?);
+
+    match wal.replay() {
+        Ok((entries, stats)) => {
+            if stats.skipped > 0 || stats.crc_errors > 0 || stats.truncated {
+                tracing::warn!(
+                    "WAL replay stats: {} ok, {} skipped, {} CRC errors, truncated={}",
+                    stats.success,
+                    stats.skipped,
+                    stats.crc_errors,
+                    stats.truncated
+                );
+            }
+            if !entries.is_empty() {
+                tracing::info!("Replaying {} WAL entries", entries.len());
+                for entry in entries {
+                    apply_wal_entry(&db, &entry);
+                }
+                tracing::info!("WAL replay complete");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("WAL replay failed: {}", e);
+        }
+    }
+
+    // Parse RBAC configuration
+    let rbac = parse_rbac_config();
+    let api_key = if rbac.is_some() {
+        tracing::info!("RBAC authentication enabled");
+        None
+    } else {
+        let key = std::env::var("VECTORS_DB_API_KEY").ok();
+        if key.is_some() {
+            tracing::info!("API key authentication enabled");
+        } else {
+            tracing::info!("No API key set — running in dev mode (no auth)");
+        }
+        key
+    };
+
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()?;
+
+    let max_memory_bytes = args.max_memory_mb * 1024 * 1024;
+
+    // Parse peers: "2=host2:3030,3=host3:3030"
+    let peer_addrs: Option<std::collections::HashMap<u64, String>> = args.peers.as_ref().map(|p| {
+        p.split(',')
+            .filter_map(|entry| {
+                let parts: Vec<&str> = entry.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    parts[0]
+                        .parse::<u64>()
+                        .ok()
+                        .map(|id| (id, parts[1].to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
+
+    // Initialize Raft if --node-id is provided
+    let (raft, routing_table) = if let Some(node_id) = args.node_id {
+        tracing::info!("Cluster mode: node_id={}", node_id);
+        let db_arc = Arc::new(db.clone());
+        let sm = Arc::new(cluster::store::StateMachineStore::new(db_arc));
+        let routing = sm.routing_table.clone();
+        let log_store = cluster::store::LogStore::default();
+        let network = cluster::network::NetworkFactory::new();
+
+        let raft_config = Arc::new(
+            openraft::Config {
+                heartbeat_interval: 500,
+                election_timeout_min: 1500,
+                election_timeout_max: 3000,
+                ..Default::default()
+            }
+            .validate()?,
+        );
+
+        let raft = cluster::Raft::new(node_id, raft_config, network, log_store, sm).await?;
+
+        tracing::info!("Raft node {} initialized", node_id);
+        (Some(Arc::new(raft)), Some(routing))
+    } else {
+        (None, None)
+    };
+
+    let wal_path = PathBuf::from(&args.data_dir).join("wal.bin");
+
+    let state = AppState {
+        db: db.clone(),
+        data_dir: args.data_dir.clone(),
+        wal: wal.clone(),
+        wal_path: wal_path.clone(),
+        api_key,
+        prometheus_handle,
+        max_memory_bytes,
+        rbac,
+        raft: raft.clone(),
+        node_id: args.node_id,
+        routing_table: routing_table.clone(),
+        peer_addrs: peer_addrs.clone(),
+        start_time: Instant::now(),
+        key_rate_limiters: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+    };
+
+    let mut app = create_router(state);
+
+    // Mount Raft internal API routes if in cluster mode
+    if let Some(ref raft_instance) = raft {
+        let raft_state = cluster::api::RaftState {
+            raft: raft_instance.clone(),
+        };
+        app = app.merge(cluster::api::raft_router(raft_state));
+    }
+    let addr = format!("0.0.0.0:{}", args.port);
+    let collections_count = db.collections.read().len();
+
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        port = args.port,
+        data_dir = %args.data_dir,
+        max_memory_mb = args.max_memory_mb,
+        snapshot_interval_secs = args.snapshot_interval,
+        tls = args.tls_cert.is_some(),
+        cluster_mode = args.node_id.is_some(),
+        collections = collections_count,
+        "vectors.db ready"
+    );
+
+    // Spawn collection metrics background task
+    let metrics_db = db.clone();
+    let metrics_wal_path = wal_path.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            metrics::update_collection_metrics(&metrics_db);
+            metrics::update_wal_metrics(&metrics_wal_path);
+        }
+    });
+
+    // Spawn auto-snapshot background task
+    if args.snapshot_interval > 0 {
+        let snap_db = db.clone();
+        let snap_wal = wal.clone();
+        let snap_data_dir = args.data_dir.clone();
+        let snap_interval = args.snapshot_interval;
+        tracing::info!("Auto-snapshots enabled every {}s", snap_interval);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(snap_interval));
+            interval.tick().await; // skip the first immediate tick
+            loop {
+                interval.tick().await;
+                tracing::info!("Running periodic snapshot...");
+                // Freeze the WAL to block writes during save + truncate
+                let _gate = snap_wal.freeze();
+                let collections = snap_db.collections.read();
+                let mut all_saved = true;
+                for (name, collection) in collections.iter() {
+                    if let Err(e) = save_collection(collection, &snap_data_dir) {
+                        tracing::error!("Snapshot failed for '{}': {}", name, e);
+                        all_saved = false;
+                    }
+                }
+                drop(collections);
+                if all_saved {
+                    if let Err(e) = snap_wal.truncate() {
+                        tracing::error!("WAL truncate after snapshot failed: {}", e);
+                    } else {
+                        tracing::info!("Periodic snapshot complete, WAL truncated");
+                    }
+                }
+            }
+        });
+    }
+
+    match (args.tls_cert, args.tls_key) {
+        (Some(cert), Some(key)) => {
+            tracing::info!("TLS enabled");
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                .await?;
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                wait_for_signal().await;
+                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
+            });
+            axum_server::bind_rustls(addr.parse()?, tls_config)
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        (None, None) => {
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(wait_for_signal())
+                .await?;
+        }
+        _ => {
+            eprintln!("Error: Both --tls-cert and --tls-key must be provided together");
+            std::process::exit(1);
+        }
+    }
+
+    // Flush AFTER Axum has drained all in-flight requests
+    flush_and_shutdown(&db, &wal, &args.data_dir);
+
+    Ok(())
+}
+
+/// Parse RBAC configuration from environment variables.
+fn parse_rbac_config() -> Option<RbacConfig> {
+    // Try VECTORS_DB_API_KEYS first (JSON array)
+    if let Ok(json_str) = std::env::var("VECTORS_DB_API_KEYS") {
+        match serde_json::from_str::<Vec<ApiKeyEntry>>(&json_str) {
+            Ok(entries) if !entries.is_empty() => {
+                return Some(RbacConfig::from_entries(entries));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "Error: VECTORS_DB_API_KEYS contains invalid JSON: {}",
+                    e
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    None
+}
+
+/// Apply a single WAL entry to the database (idempotent).
+fn apply_wal_entry(db: &Database, entry: &WalEntry) {
+    match entry {
+        WalEntry::CreateCollection {
+            name,
+            dimension,
+            config,
+        } => match db.create_collection(name.clone(), *dimension, Some(config.clone())) {
+            Ok(()) => tracing::info!("WAL replay: created collection '{}'", name),
+            Err(_) => tracing::debug!("WAL replay: collection '{}' already exists, skipping", name),
+        },
+        WalEntry::DeleteCollection { name } => {
+            if db.delete_collection(name) {
+                tracing::info!("WAL replay: deleted collection '{}'", name);
+            } else {
+                tracing::debug!(
+                    "WAL replay: collection '{}' not found, skipping delete",
+                    name
+                );
+            }
+        }
+        WalEntry::InsertDocument {
+            collection_name,
+            document,
+            embedding,
+        } => {
+            if let Some(collection) = db.get_collection(collection_name) {
+                if collection.get_document(&document.id).is_some() {
+                    tracing::debug!(
+                        "WAL replay: document '{}' already exists, skipping",
+                        document.id
+                    );
+                    return;
+                }
+                collection.insert_document(document.clone(), embedding.clone());
+                tracing::info!(
+                    "WAL replay: inserted document '{}' into '{}'",
+                    document.id,
+                    collection_name
+                );
+            } else {
+                tracing::warn!(
+                    "WAL replay: collection '{}' not found for insert, skipping",
+                    collection_name
+                );
+            }
+        }
+        WalEntry::DeleteDocument {
+            collection_name,
+            document_id,
+        } => {
+            if let Some(collection) = db.get_collection(collection_name) {
+                if collection.delete_document(document_id) {
+                    tracing::info!(
+                        "WAL replay: deleted document '{}' from '{}'",
+                        document_id,
+                        collection_name
+                    );
+                } else {
+                    tracing::debug!(
+                        "WAL replay: document '{}' not found, skipping delete",
+                        document_id
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "WAL replay: collection '{}' not found for delete, skipping",
+                    collection_name
+                );
+            }
+        }
+        WalEntry::InsertDocumentBatch {
+            collection_name,
+            documents,
+        } => {
+            if let Some(collection) = db.get_collection(collection_name) {
+                let mut inserted = 0;
+                for (document, embedding) in documents {
+                    if collection.get_document(&document.id).is_some() {
+                        tracing::debug!(
+                            "WAL replay: document '{}' already exists, skipping",
+                            document.id
+                        );
+                        continue;
+                    }
+                    collection.insert_document(document.clone(), embedding.clone());
+                    inserted += 1;
+                }
+                tracing::info!(
+                    "WAL replay: batch inserted {} documents into '{}'",
+                    inserted,
+                    collection_name
+                );
+            } else {
+                tracing::warn!(
+                    "WAL replay: collection '{}' not found for batch insert, skipping",
+                    collection_name
+                );
+            }
+        }
+        WalEntry::UpdateDocument {
+            collection_name,
+            document_id,
+            document,
+            embedding,
+        } => {
+            if let Some(collection) = db.get_collection(collection_name) {
+                collection.delete_document(document_id);
+                collection.insert_document(document.clone(), embedding.clone());
+                tracing::info!(
+                    "WAL replay: updated document '{}' in '{}'",
+                    document_id,
+                    collection_name
+                );
+            } else {
+                tracing::warn!(
+                    "WAL replay: collection '{}' not found for update, skipping",
+                    collection_name
+                );
+            }
+        }
+    }
+}
+
+/// Wait for SIGINT or SIGTERM, then return to trigger Axum's graceful shutdown.
+///
+/// Does NOT flush data — that happens in [`flush_and_shutdown`] after Axum
+/// has drained all in-flight requests.
+async fn wait_for_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install Ctrl+C handler: {}", e);
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to install SIGTERM handler: {}", e);
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received SIGINT"),
+        _ = terminate => tracing::info!("Received SIGTERM"),
+    }
+
+    tracing::info!("Shutting down gracefully, draining in-flight requests...");
+}
+
+/// Flush all collections to disk and truncate the WAL.
+///
+/// Called after the server has stopped accepting new connections and all
+/// in-flight requests have completed, ensuring no data is lost.
+fn flush_and_shutdown(db: &Database, wal: &WriteAheadLog, data_dir: &str) {
+    tracing::info!("All requests drained, flushing data...");
+
+    // Freeze the WAL to drain any pending group commit batch
+    let _gate = wal.freeze();
+
+    let collections = db.collections.read();
+    let mut all_saved = true;
+    for (name, collection) in collections.iter() {
+        match save_collection(collection, data_dir) {
+            Ok(()) => tracing::info!("Saved collection '{}' on shutdown", name),
+            Err(e) => {
+                tracing::error!("Failed to save collection '{}': {}", name, e);
+                all_saved = false;
+            }
+        }
+    }
+
+    if all_saved {
+        if let Err(e) = wal.truncate() {
+            tracing::error!("Failed to truncate WAL: {}", e);
+        } else {
+            tracing::info!("WAL truncated after successful flush");
+        }
+    } else {
+        tracing::warn!("Some collections failed to save — WAL preserved for recovery");
+    }
+}
