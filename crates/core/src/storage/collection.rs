@@ -92,16 +92,6 @@ impl CollectionData {
             ));
         }
 
-        // Raw f32 vector arena
-        if self.hnsw_index.raw_vectors.len() != nc * dim {
-            return Err(format!(
-                "raw_vectors length {} != node_count({}) * dimension({})",
-                self.hnsw_index.raw_vectors.len(),
-                nc,
-                dim
-            ));
-        }
-
         // Graph structure arrays
         if self.hnsw_index.neighbors.len() != nc {
             return Err(format!(
@@ -479,8 +469,7 @@ impl Collection {
         let data = self.data.read();
         let mut total = 0usize;
 
-        // HNSW vectors: raw_vectors (f32) + vector_data (u8) + min/scale vecs
-        total += data.hnsw_index.raw_vectors.len() * 4;
+        // HNSW vectors: vector_data (u8) + min/scale vecs (raw_vectors no longer stored)
         total += data.hnsw_index.vector_data.len();
         total += data.hnsw_index.vector_min.len() * 4;
         total += data.hnsw_index.vector_scale.len() * 4;
@@ -532,16 +521,18 @@ impl Collection {
         // Phase A: snapshot under read lock
         let (live_docs, dimension, config) = {
             let data = self.data.read();
+            let dim = data.dimension;
             let docs: Vec<(Uuid, Arc<Document>, Vec<f32>)> = data
                 .documents
                 .iter()
                 .filter_map(|(uuid, doc)| {
                     let internal_id = data.uuid_to_internal.get(uuid)?;
-                    let raw = data.hnsw_index.get_raw_vector(*internal_id).to_vec();
+                    let mut raw = vec![0.0f32; dim];
+                    data.hnsw_index.dequantize_into(*internal_id, &mut raw);
                     Some((*uuid, Arc::clone(doc), raw))
                 })
                 .collect();
-            (docs, data.dimension, data.hnsw_index.config.clone())
+            (docs, dim, data.hnsw_index.config.clone())
         }; // read lock released
 
         // Phase B: build new indices without any lock
@@ -580,7 +571,8 @@ impl Collection {
                     }
                     // New documents have an internal_id assigned after Phase A snapshot
                     let internal_id = data.uuid_to_internal.get(uuid)?;
-                    let raw = data.hnsw_index.get_raw_vector(*internal_id).to_vec();
+                    let mut raw = vec![0.0f32; dimension];
+                    data.hnsw_index.dequantize_into(*internal_id, &mut raw);
                     Some((*uuid, Arc::clone(doc), raw))
                 })
                 .collect();

@@ -2,8 +2,8 @@
 //!
 //! This module implements the HNSW algorithm for fast approximate nearest neighbor search.
 //! Vectors are stored using scalar quantization (f32 → u8) for 4× memory reduction,
-//! with asymmetric distance computation (f32 query vs u8 stored) during search and
-//! exact f32 reranking for final results.
+//! with asymmetric distance computation (f32 query vs u8 stored) during search.
+//! No raw f32 vectors are stored — all distances use quantized representations.
 //!
 //! The graph uses a Struct-of-Arrays (SoA) layout for cache-friendly access:
 //! all vector bytes are stored contiguously in an arena, with separate arrays for

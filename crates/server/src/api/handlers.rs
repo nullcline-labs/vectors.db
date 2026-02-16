@@ -555,7 +555,10 @@ pub async fn update_document(
             .uuid_to_internal
             .get(&id)
             .ok_or_else(|| ApiError::Internal("Internal error".into()))?;
-        data.hnsw_index.get_raw_vector(*internal_id).to_vec()
+        let dim = data.dimension;
+        let mut raw = vec![0.0f32; dim];
+        data.hnsw_index.dequantize_into(*internal_id, &mut raw);
+        raw
     };
 
     let new_doc = Document::with_id(id, new_text, new_metadata);

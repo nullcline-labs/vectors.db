@@ -2,7 +2,7 @@
 //!
 //! Supports optional pre-filtering via a predicate `Fn(u32) -> bool` applied during
 //! graph traversal. Filtered nodes are still used for navigation but excluded from results.
-//! Uses asymmetric u8 quantized distance for fast navigation, then reranks with exact f32.
+//! Uses asymmetric f32-vs-u8 quantized distance (or PQ ADC when enabled).
 
 use crate::hnsw::graph::HnswIndex;
 use crate::hnsw::visited::VisitedSet;
@@ -50,22 +50,17 @@ impl PartialOrd for ResultEntry {
 }
 
 /// Compute distance from query to a node in the index.
-/// When `exact` is true, uses f32-vs-f32 raw vectors (no quantization loss).
 /// When PQ table is available, uses M table lookups (fastest approximate).
-/// Otherwise, uses f32-vs-u8 asymmetric distance (fast, approximate).
+/// Otherwise, uses f32-vs-u8 asymmetric distance (SIMD-optimized).
 #[inline]
 fn compute_distance(
     index: &HnswIndex,
     query: &[f32],
     node_id: u32,
     query_norm_sq: f32,
-    exact: bool,
     pq_table: Option<&PqDistanceTable>,
 ) -> f32 {
-    if exact {
-        let raw = index.get_raw_vector(node_id);
-        index.config.distance_metric.distance_exact(query, raw)
-    } else if let Some(table) = pq_table {
+    if let Some(table) = pq_table {
         let codes = index.get_pq_codes(node_id);
         table.distance(codes)
     } else {
@@ -81,8 +76,6 @@ fn compute_distance(
 /// Returns ef closest non-deleted nodes to the query at the given layer.
 /// `visited` is a reusable VisitedSet (cleared at the start of each call).
 /// `query_norm_sq` is the precomputed sum of squares of the query vector.
-/// `exact`: when true uses f32 raw vectors for distance (higher quality, for construction);
-///          when false uses u8 quantized asymmetric distance (faster, for search).
 #[allow(clippy::too_many_arguments)]
 pub fn search_layer<F: Fn(u32) -> bool>(
     index: &HnswIndex,
@@ -92,7 +85,6 @@ pub fn search_layer<F: Fn(u32) -> bool>(
     layer: usize,
     visited: &mut VisitedSet,
     query_norm_sq: f32,
-    exact: bool,
     filter_fn: &F,
     pq_table: Option<&PqDistanceTable>,
 ) -> Vec<(f32, u32)> {
@@ -105,7 +97,7 @@ pub fn search_layer<F: Fn(u32) -> bool>(
 
     for &ep in entry_points {
         if visited.insert(ep) {
-            let dist = compute_distance(index, query, ep, query_norm_sq, exact, pq_table);
+            let dist = compute_distance(index, query, ep, query_norm_sq, pq_table);
             candidates.push(Candidate {
                 neg_distance: OrderedFloat(-dist),
                 id: ep,
@@ -142,9 +134,7 @@ pub fn search_layer<F: Fn(u32) -> bool>(
             // Prefetch next neighbor's data while processing current
             if i + 1 < neighbor_list.len() {
                 let next_id = neighbor_list[i + 1];
-                if exact {
-                    index.prefetch_raw_vector(next_id);
-                } else if pq_table.is_some() {
+                if pq_table.is_some() {
                     index.prefetch_pq_codes(next_id);
                 } else {
                     index.prefetch_vector(next_id);
@@ -155,7 +145,7 @@ pub fn search_layer<F: Fn(u32) -> bool>(
                 continue;
             }
 
-            let dist = compute_distance(index, query, neighbor_id, query_norm_sq, exact, pq_table);
+            let dist = compute_distance(index, query, neighbor_id, query_norm_sq, pq_table);
 
             let should_add = results.len() < ef || dist < worst_dist;
 
@@ -187,7 +177,7 @@ pub fn search_layer<F: Fn(u32) -> bool>(
 }
 
 /// Multi-layer KNN search through the HNSW graph.
-/// Uses u8 quantized distance for fast navigation, then reranks with exact f32 distances.
+/// Uses asymmetric f32-vs-u8 distance (or PQ ADC), with asymmetric reranking.
 pub fn knn_search(index: &HnswIndex, query: &[f32], k: usize) -> Vec<(f32, u32)> {
     knn_search_filtered(index, query, k, &|_: u32| true)
 }
@@ -232,7 +222,6 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
             layer,
             &mut visited,
             query_norm_sq,
-            false,
             &no_filter,
             pq_table_ref,
         );
@@ -241,7 +230,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         }
     }
 
-    // Search layer 0 with ef_search (quantized, fast) — apply filter here
+    // Search layer 0 with ef_search — apply filter here
     let ef = index.config.ef_search.max(k);
     let mut results = search_layer(
         index,
@@ -251,18 +240,21 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         0,
         &mut visited,
         query_norm_sq,
-        false,
         filter_fn,
         pq_table_ref,
     );
 
-    // Rerank all candidates using exact f32 distances (no quantization loss)
+    // Rerank candidates using asymmetric f32-vs-u8 distance (refines PQ ordering)
     for i in 0..results.len() {
         if i + 1 < results.len() {
-            index.prefetch_raw_vector(results[i + 1].1);
+            index.prefetch_vector(results[i + 1].1);
         }
-        let raw = index.get_raw_vector(results[i].1);
-        results[i].0 = index.config.distance_metric.distance_exact(query, raw);
+        let vref = index.get_vector_ref(results[i].1);
+        results[i].0 =
+            index
+                .config
+                .distance_metric
+                .distance_asym_prenorm(query, vref, query_norm_sq);
     }
     results.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 

@@ -54,7 +54,8 @@ pub struct HnswIndex {
     pub vector_data: Vec<u8>,
     pub vector_min: Vec<f32>,
     pub vector_scale: Vec<f32>,
-    // SoA: raw f32 vector arena for reranking (contiguous, dim floats per node)
+    // SoA: raw f32 vector arena (legacy, no longer populated; kept for serde compat)
+    #[serde(default)]
     pub raw_vectors: Vec<f32>,
     // SoA: graph structure
     pub neighbors: Vec<Vec<Vec<u32>>>, // [node_id][layer][neighbor_ids]
@@ -165,17 +166,19 @@ impl HnswIndex {
         self.vector_scale.push(vector.scale);
     }
 
-    /// Store the raw f32 vector for reranking.
+    /// Dequantize a node's vector into the provided buffer (no allocation).
     #[inline]
-    pub fn push_raw_vector(&mut self, raw: &[f32]) {
-        self.raw_vectors.extend_from_slice(raw);
+    pub fn dequantize_into(&self, id: u32, buf: &mut [f32]) {
+        let vref = self.get_vector_ref(id);
+        for (i, &b) in vref.data.iter().enumerate() {
+            buf[i] = vref.min + b as f32 * vref.scale;
+        }
     }
 
-    /// Get a slice to the raw f32 vector for a given node. O(1).
-    #[inline]
-    pub fn get_raw_vector(&self, id: u32) -> &[f32] {
-        let start = id as usize * self.dimension;
-        &self.raw_vectors[start..start + self.dimension]
+    /// Free legacy raw_vectors memory (called after loading old snapshots).
+    pub fn free_raw_vectors(&mut self) {
+        self.raw_vectors.clear();
+        self.raw_vectors.shrink_to_fit();
     }
 
     /// Mark a node as deleted by internal ID.
@@ -195,15 +198,6 @@ impl HnswIndex {
         if start < self.vector_data.len() {
             prefetch_read(unsafe { self.vector_data.as_ptr().add(start) });
             prefetch_read(unsafe { self.vector_min.as_ptr().add(id as usize) as *const u8 });
-        }
-    }
-
-    /// Prefetch raw f32 vector data for a node (for reranking / exact distance).
-    #[inline(always)]
-    pub fn prefetch_raw_vector(&self, id: u32) {
-        let start = id as usize * self.dimension;
-        if start < self.raw_vectors.len() {
-            prefetch_read(unsafe { self.raw_vectors.as_ptr().add(start) as *const u8 });
         }
     }
 
@@ -227,19 +221,22 @@ impl HnswIndex {
     }
 
     /// Train PQ codebook on current vectors and encode all nodes.
+    /// Dequantizes from scalar quantization into a temporary buffer for training.
     /// Does nothing if pq_subspaces is 0 or the index is empty.
     pub fn train_pq(&mut self) {
         let m = self.config.pq_subspaces;
         if m == 0 || self.node_count == 0 {
             return;
         }
-        let codebook = PqCodebook::train(
-            &self.raw_vectors,
-            self.dimension,
-            m,
-            config::PQ_NUM_CENTROIDS,
-        );
-        self.pq_codes = codebook.encode_batch(&self.raw_vectors, self.dimension);
+        // Dequantize all vectors into a transient buffer for PQ training
+        let n = self.node_count as usize;
+        let dim = self.dimension;
+        let mut deq = vec![0.0f32; n * dim];
+        for id in 0..n {
+            self.dequantize_into(id as u32, &mut deq[id * dim..(id + 1) * dim]);
+        }
+        let codebook = PqCodebook::train(&deq, dim, m, config::PQ_NUM_CENTROIDS);
+        self.pq_codes = codebook.encode_batch(&deq, dim);
         self.pq_codebook = Some(codebook);
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Inserts a vector into the HNSW graph with bidirectional connections and
 //! heuristic neighbor pruning (Algorithm 4 from the HNSW paper).
-//! Uses exact f32 distances during construction for high-quality graph connectivity.
+//! Uses asymmetric f32-vs-u8 distance during construction (no raw_vectors stored).
 
 use crate::hnsw::graph::HnswIndex;
 use crate::hnsw::search::search_layer;
@@ -11,8 +11,8 @@ use crate::quantization::QuantizedVector;
 
 impl HnswIndex {
     /// Insert a new vector into the HNSW index (SoA layout).
-    /// Uses exact f32 distances for graph construction (high-quality connections).
-    /// Stores both the quantized vector (for fast search navigation) and the raw f32 vector.
+    /// Uses asymmetric f32-vs-u8 distance for graph construction.
+    /// Only the quantized vector is stored (no raw f32 vector).
     /// internal_id must equal node_count before this call.
     pub fn insert(&mut self, internal_id: u32, raw_vector: &[f32], vector: QuantizedVector) {
         let level = self.random_level();
@@ -20,7 +20,6 @@ impl HnswIndex {
         // First node — push SoA fields and return
         if self.entry_point.is_none() {
             self.push_vector(&vector);
-            self.push_raw_vector(raw_vector);
             if let Some(ref cb) = self.pq_codebook {
                 let codes = cb.encode(raw_vector);
                 self.pq_codes.extend_from_slice(&codes);
@@ -50,7 +49,7 @@ impl HnswIndex {
         let mut visited = VisitedSet::new(self.node_count as usize);
 
         // Phase 1: Greedily traverse from top layer down to node's level + 1
-        // Uses exact f32 distances for high-quality graph construction
+        // Uses asymmetric f32-vs-u8 distance (query is the new node's raw f32 vector)
         let no_filter = |_: u32| true;
         for layer in (level + 1..=self.max_layer).rev() {
             let results = search_layer(
@@ -61,7 +60,6 @@ impl HnswIndex {
                 layer,
                 &mut visited,
                 query_norm_sq,
-                true,
                 &no_filter,
                 None,
             );
@@ -72,7 +70,6 @@ impl HnswIndex {
 
         // Phase 2: Search each layer and collect neighbors for the new node.
         // We collect all neighbor lists first, then push the node.
-        // Uses exact f32 distances for high-quality graph construction
         let top = level.min(self.max_layer);
         let mut node_neighbors: Vec<Vec<u32>> = Vec::with_capacity(level + 1);
         for _ in 0..=level {
@@ -90,7 +87,6 @@ impl HnswIndex {
                 layer,
                 &mut visited,
                 query_norm_sq,
-                true,
                 &no_filter,
                 None,
             );
@@ -114,7 +110,6 @@ impl HnswIndex {
 
         // Push the new node's SoA fields
         self.push_vector(&vector);
-        self.push_raw_vector(raw_vector);
         if let Some(ref cb) = self.pq_codebook {
             let codes = cb.encode(raw_vector);
             self.pq_codes.extend_from_slice(&codes);
@@ -125,7 +120,10 @@ impl HnswIndex {
         self.node_count += 1;
 
         // Phase 3: Add bidirectional connections and prune over-capacity neighbors
-        // Uses exact f32 distances for pruning decisions
+        // Dequantizes base node to f32, then uses asymmetric f32-vs-u8 for pruning
+        let metric = self.config.distance_metric;
+        let dim = self.dimension;
+        let mut base_buf = vec![0.0f32; dim];
         for layer in 0..=top {
             let m_max = if layer == 0 {
                 self.config.m_max0
@@ -143,18 +141,15 @@ impl HnswIndex {
                 }
                 self.neighbors[nid][layer].push(internal_id);
 
-                // Prune if over capacity — using exact f32 distances
+                // Prune if over capacity — dequantize base, asymmetric f32-vs-u8
                 if self.neighbors[nid][layer].len() > m_max {
-                    let neighbor_raw = self.get_raw_vector(neighbor_id);
+                    self.dequantize_into(neighbor_id, &mut base_buf);
                     let neighbor_ids: Vec<u32> = self.neighbors[nid][layer].clone();
                     let candidates: Vec<(f32, u32)> = neighbor_ids
                         .iter()
                         .map(|&cid| {
-                            let cid_raw = self.get_raw_vector(cid);
-                            let dist = self
-                                .config
-                                .distance_metric
-                                .distance_exact(cid_raw, neighbor_raw);
+                            let cid_ref = self.get_vector_ref(cid);
+                            let dist = metric.distance_asym(&base_buf, cid_ref);
                             (dist, cid)
                         })
                         .collect();
@@ -176,6 +171,7 @@ impl HnswIndex {
 /// Prefers diverse neighbors: a candidate is selected only if it is closer to the base node
 /// than to any already-selected neighbor. This avoids redundant clusters of near-identical
 /// neighbors and ensures better graph connectivity, especially for cosine distance.
+/// Dequantizes each candidate to f32, then uses asymmetric f32-vs-u8 for pairwise distances.
 fn select_neighbors_heuristic(
     index: &HnswIndex,
     candidates: &[(f32, u32)],
@@ -185,20 +181,19 @@ fn select_neighbors_heuristic(
     sorted.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut selected: Vec<(f32, u32)> = Vec::with_capacity(m);
+    let metric = index.config.distance_metric;
+    let mut cid_buf = vec![0.0f32; index.dimension];
 
     for &(dist_to_base, cid) in &sorted {
         if selected.len() >= m {
             break;
         }
 
-        // Check if this candidate is closer to base than to any already-selected neighbor
-        let cid_raw = index.get_raw_vector(cid);
+        // Dequantize candidate once, then compare against all selected neighbors
+        index.dequantize_into(cid, &mut cid_buf);
         let is_diverse = selected.iter().all(|&(_, sid)| {
-            let sid_raw = index.get_raw_vector(sid);
-            let dist_to_selected = index
-                .config
-                .distance_metric
-                .distance_exact(cid_raw, sid_raw);
+            let sid_ref = index.get_vector_ref(sid);
+            let dist_to_selected = metric.distance_asym(&cid_buf, sid_ref);
             dist_to_base <= dist_to_selected
         });
 
