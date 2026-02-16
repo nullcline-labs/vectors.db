@@ -6,7 +6,7 @@
 
 A lightweight, in-memory vector database with HNSW indexing, BM25 full-text search, and hybrid retrieval.
 
-[![CI](https://github.com/memoclaudio/vectors.db/actions/workflows/ci.yml/badge.svg)](https://github.com/memoclaudio/vectors.db/actions/workflows/ci.yml)
+[![CI](https://github.com/nullcline-labs/vectors.db/actions/workflows/ci.yml/badge.svg)](https://github.com/nullcline-labs/vectors.db/actions/workflows/ci.yml)
 
 ## Features
 
