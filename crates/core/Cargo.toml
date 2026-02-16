@@ -14,19 +14,3 @@ parking_lot = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
 crc32fast = { workspace = true }
-
-[[bench]]
-name = "ann_glove25"
-harness = false
-
-[[bench]]
-name = "ann_glove100"
-harness = false
-
-[[bench]]
-name = "ann_sift128"
-harness = false
-
-[[bench]]
-name = "bm25_nfcorpus"
-harness = false
