@@ -303,3 +303,184 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         results
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hnsw::graph::{HnswConfig, HnswIndex};
+    use crate::hnsw::DistanceMetric;
+    use crate::quantization::QuantizedVector;
+
+    fn make_config(metric: DistanceMetric) -> HnswConfig {
+        HnswConfig {
+            m: 8,
+            m_max0: 16,
+            ef_construction: 100,
+            ef_search: 50,
+            max_layers: 8,
+            distance_metric: metric,
+            pq_subspaces: 0,
+            store_raw_vectors: false,
+        }
+    }
+
+    fn build_index(dim: usize, vecs: &[Vec<f32>], metric: DistanceMetric) -> HnswIndex {
+        let mut index = HnswIndex::new(dim, make_config(metric));
+        for (i, v) in vecs.iter().enumerate() {
+            let q = QuantizedVector::quantize(v);
+            index.insert(i as u32, v, q);
+        }
+        index
+    }
+
+    #[test]
+    fn test_empty_index_search() {
+        let index = HnswIndex::new(4, make_config(DistanceMetric::Cosine));
+        let results = knn_search(&index, &[1.0, 0.0, 0.0, 0.0], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_single_insert_and_search() {
+        let vecs = vec![vec![1.0, 0.0, 0.0, 0.0]];
+        let index = build_index(4, &vecs, DistanceMetric::Cosine);
+        assert_eq!(index.node_count, 1);
+        let results = knn_search(&index, &[1.0, 0.0, 0.0, 0.0], 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, 0);
+    }
+
+    #[test]
+    fn test_nearest_neighbor_self_recall() {
+        let dim = 16;
+        let n = 50;
+        // Use hash-based generation to avoid collisions
+        let vecs: Vec<Vec<f32>> = (0..n)
+            .map(|i| {
+                (0..dim)
+                    .map(|j| {
+                        let h = ((i + 1) * 2654435761 + j * 40503) & 0xFFFF;
+                        h as f32 / 65535.0
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut config = make_config(DistanceMetric::Cosine);
+        config.store_raw_vectors = true;
+        let mut index = HnswIndex::new(dim, config);
+        for (i, v) in vecs.iter().enumerate() {
+            let q = QuantizedVector::quantize(v);
+            index.insert(i as u32, v, q);
+        }
+        let results = knn_search(&index, &vecs[0], 5);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].1, 0, "vector 0 should be nearest to itself");
+    }
+
+    #[test]
+    fn test_filtered_search_excludes_ids() {
+        let dim = 4;
+        let vecs = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.9, 0.1, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+        ];
+        let index = build_index(dim, &vecs, DistanceMetric::Cosine);
+        let results = knn_search_filtered(&index, &[1.0, 0.0, 0.0, 0.0], 2, &|id: u32| id >= 2);
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|&(_, id)| id >= 2));
+    }
+
+    #[test]
+    fn test_mark_deleted_excludes_from_results() {
+        let dim = 4;
+        let vecs = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.9, 0.1, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+        ];
+        let mut index = build_index(dim, &vecs, DistanceMetric::Cosine);
+        let results = knn_search(&index, &[1.0, 0.0, 0.0, 0.0], 1);
+        assert_eq!(results[0].1, 0);
+        index.mark_deleted(0);
+        let results = knn_search(&index, &[1.0, 0.0, 0.0, 0.0], 1);
+        assert!(!results.is_empty());
+        assert_ne!(results[0].1, 0, "deleted node should not appear in results");
+    }
+
+    #[test]
+    fn test_euclidean_nearest() {
+        let dim = 4;
+        let vecs = vec![
+            vec![0.0, 0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![10.0, 0.0, 0.0, 0.0],
+        ];
+        let index = build_index(dim, &vecs, DistanceMetric::Euclidean);
+        let results = knn_search(&index, &[1.1, 0.0, 0.0, 0.0], 3);
+        assert_eq!(results[0].1, 1, "nearest to [1.1,0,0,0] should be vec[1]");
+    }
+
+    #[test]
+    fn test_dot_product_search() {
+        let dim = 4;
+        let vecs = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![2.0, 0.0, 0.0, 0.0],
+        ];
+        let index = build_index(dim, &vecs, DistanceMetric::DotProduct);
+        let results = knn_search(&index, &[1.0, 0.0, 0.0, 0.0], 3);
+        assert_eq!(
+            results[0].1, 2,
+            "highest dot product should be with [2,0,0,0]"
+        );
+    }
+
+    #[test]
+    fn test_k_larger_than_index() {
+        let dim = 4;
+        let vecs = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+        let index = build_index(dim, &vecs, DistanceMetric::Cosine);
+        let results = knn_search(&index, &[1.0, 0.0, 0.0, 0.0], 100);
+        assert_eq!(results.len(), 2, "should return all vectors when k > n");
+    }
+
+    #[test]
+    fn test_store_raw_vectors_reranking() {
+        let mut config = make_config(DistanceMetric::Cosine);
+        config.store_raw_vectors = true;
+        let dim = 4;
+        let mut index = HnswIndex::new(dim, config);
+        let vecs = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.95, 0.05, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+        ];
+        for (i, v) in vecs.iter().enumerate() {
+            let q = QuantizedVector::quantize(v);
+            index.insert(i as u32, v, q);
+        }
+        assert!(index.has_raw_vectors());
+        let results = knn_search(&index, &[1.0, 0.0, 0.0, 0.0], 3);
+        assert_eq!(results[0].1, 0);
+    }
+
+    #[test]
+    fn test_graph_structure_after_insert() {
+        let dim = 4;
+        let vecs: Vec<Vec<f32>> = (0..20)
+            .map(|i| {
+                (0..dim)
+                    .map(|j| ((i * 3 + j * 7) % 53) as f32 / 53.0)
+                    .collect()
+            })
+            .collect();
+        let index = build_index(dim, &vecs, DistanceMetric::Cosine);
+        assert_eq!(index.node_count, 20);
+        assert_eq!(index.len(), 20);
+        assert!(!index.is_empty());
+        assert!(index.entry_point.is_some());
+    }
+}

@@ -110,3 +110,174 @@ fn json_cmp(meta: &MetadataValue, json: &serde_json::Value) -> Option<std::cmp::
     let json_f = json.as_f64()?;
     meta_f.partial_cmp(&json_f)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn meta(pairs: Vec<(&str, MetadataValue)>) -> HashMap<String, MetadataValue> {
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn cond(field: &str, op: FilterOperator, value: serde_json::Value) -> FilterCondition {
+        FilterCondition {
+            field: field.to_string(),
+            op,
+            value: Some(value),
+            values: None,
+        }
+    }
+
+    fn in_cond(field: &str, values: Vec<serde_json::Value>) -> FilterCondition {
+        FilterCondition {
+            field: field.to_string(),
+            op: FilterOperator::In,
+            value: None,
+            values: Some(values),
+        }
+    }
+
+    #[test]
+    fn test_eq_string() {
+        let metadata = meta(vec![("color", MetadataValue::String("red".into()))]);
+        let filter = FilterClause {
+            must: vec![cond("color", FilterOperator::Eq, json!("red"))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_eq_string_mismatch() {
+        let metadata = meta(vec![("color", MetadataValue::String("blue".into()))]);
+        let filter = FilterClause {
+            must: vec![cond("color", FilterOperator::Eq, json!("red"))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_ne_operator() {
+        let metadata = meta(vec![("status", MetadataValue::String("active".into()))]);
+        let filter = FilterClause {
+            must: vec![cond("status", FilterOperator::Ne, json!("deleted"))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_gt_integer() {
+        let metadata = meta(vec![("age", MetadataValue::Integer(25))]);
+        let filter = FilterClause {
+            must: vec![cond("age", FilterOperator::Gt, json!(18))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_lt_float() {
+        let metadata = meta(vec![("score", MetadataValue::Float(0.5))]);
+        let filter = FilterClause {
+            must: vec![cond("score", FilterOperator::Lt, json!(0.9))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_gte_boundary() {
+        let metadata = meta(vec![("count", MetadataValue::Integer(10))]);
+        let filter = FilterClause {
+            must: vec![cond("count", FilterOperator::Gte, json!(10))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_lte_boundary() {
+        let metadata = meta(vec![("count", MetadataValue::Integer(10))]);
+        let filter = FilterClause {
+            must: vec![cond("count", FilterOperator::Lte, json!(10))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_in_operator() {
+        let metadata = meta(vec![("lang", MetadataValue::String("it".into()))]);
+        let filter = FilterClause {
+            must: vec![in_cond("lang", vec![json!("en"), json!("it"), json!("fr")])],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_in_operator_miss() {
+        let metadata = meta(vec![("lang", MetadataValue::String("de".into()))]);
+        let filter = FilterClause {
+            must: vec![in_cond("lang", vec![json!("en"), json!("it")])],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_must_not() {
+        let metadata = meta(vec![("status", MetadataValue::String("deleted".into()))]);
+        let filter = FilterClause {
+            must: vec![],
+            must_not: vec![cond("status", FilterOperator::Eq, json!("deleted"))],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_must_and_must_not_combined() {
+        let metadata = meta(vec![
+            ("color", MetadataValue::String("red".into())),
+            ("size", MetadataValue::Integer(5)),
+        ]);
+        let filter = FilterClause {
+            must: vec![cond("color", FilterOperator::Eq, json!("red"))],
+            must_not: vec![cond("size", FilterOperator::Gt, json!(10))],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_missing_field_returns_false() {
+        let metadata = meta(vec![]);
+        let filter = FilterClause {
+            must: vec![cond("missing", FilterOperator::Eq, json!("anything"))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_boolean_eq() {
+        let metadata = meta(vec![("active", MetadataValue::Boolean(true))]);
+        let filter = FilterClause {
+            must: vec![cond("active", FilterOperator::Eq, json!(true))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_empty_filter_matches_all() {
+        let metadata = meta(vec![("any", MetadataValue::String("value".into()))]);
+        let filter = FilterClause {
+            must: vec![],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+}

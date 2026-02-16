@@ -333,3 +333,113 @@ impl SimpleRng {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hnsw::distance::DistanceMetric;
+
+    fn make_vectors(n: usize, dim: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; n * dim];
+        for i in 0..n {
+            for j in 0..dim {
+                v[i * dim + j] = ((i * 7 + j * 13) % 97) as f32 / 97.0;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn test_pq_train_and_encode() {
+        let dim = 8;
+        let m = 2; // 2 subspaces of 4 each
+        let n = 300; // need > 256 for meaningful centroids
+        let vectors = make_vectors(n, dim);
+        let codebook = PqCodebook::train(&vectors, dim, m, 256);
+        assert_eq!(codebook.num_subspaces, 2);
+        assert_eq!(codebook.num_centroids, 256);
+        assert_eq!(codebook.sub_dim, 4);
+
+        let codes = codebook.encode(&vectors[0..dim]);
+        assert_eq!(codes.len(), m);
+    }
+
+    #[test]
+    fn test_pq_encode_batch() {
+        let dim = 8;
+        let m = 2;
+        let n = 300;
+        let vectors = make_vectors(n, dim);
+        let codebook = PqCodebook::train(&vectors, dim, m, 256);
+        let all_codes = codebook.encode_batch(&vectors, dim);
+        assert_eq!(all_codes.len(), n * m);
+    }
+
+    #[test]
+    fn test_pq_distance_table() {
+        let dim = 8;
+        let m = 2;
+        let n = 300;
+        let vectors = make_vectors(n, dim);
+        let codebook = PqCodebook::train(&vectors, dim, m, 256);
+        let query = &vectors[0..dim];
+        let table = codebook.build_distance_table(query, DistanceMetric::Euclidean);
+        assert_eq!(table.table.len(), m * 256);
+
+        // Distance of query to itself should be small
+        let codes = codebook.encode(query);
+        let dist = table.distance(&codes);
+        assert!(dist < 0.5, "self-distance should be small, got {dist}");
+    }
+
+    #[test]
+    fn test_pq_distance_ordering() {
+        let dim = 8;
+        let m = 2;
+        let n = 300;
+        let vectors = make_vectors(n, dim);
+        let codebook = PqCodebook::train(&vectors, dim, m, 256);
+        let query = &vectors[0..dim];
+        let table = codebook.build_distance_table(query, DistanceMetric::Euclidean);
+
+        // Self should be closer than a random far vector
+        let self_codes = codebook.encode(query);
+        let far_vec: Vec<f32> = (0..dim).map(|_| 100.0).collect();
+        let far_codes = codebook.encode(&far_vec);
+        let d_self = table.distance(&self_codes);
+        let d_far = table.distance(&far_codes);
+        assert!(
+            d_self < d_far,
+            "self distance {d_self} should be < far {d_far}"
+        );
+    }
+
+    #[test]
+    fn test_pq_cosine_table() {
+        let dim = 8;
+        let m = 2;
+        let n = 300;
+        let vectors = make_vectors(n, dim);
+        let codebook = PqCodebook::train(&vectors, dim, m, 256);
+        let query = &vectors[0..dim];
+        let table = codebook.build_distance_table(query, DistanceMetric::Cosine);
+        let codes = codebook.encode(query);
+        let dist = table.distance(&codes);
+        // Cosine uses negative dot product, so self should be negative (similar)
+        assert!(
+            dist < 0.0,
+            "cosine self-distance should be negative, got {dist}"
+        );
+    }
+
+    #[test]
+    fn test_kmeans_few_points() {
+        // When n < k, each point should become its own centroid
+        let data = vec![1.0, 2.0, 3.0, 4.0]; // 2 points of dim=2
+        let centroids = kmeans(&data, 2, 256);
+        assert_eq!(centroids.len(), 256 * 2);
+        // First two centroids should match the input
+        assert_eq!(&centroids[0..2], &[1.0, 2.0]);
+        assert_eq!(&centroids[2..4], &[3.0, 4.0]);
+    }
+}

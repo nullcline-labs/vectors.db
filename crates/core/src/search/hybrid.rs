@@ -109,3 +109,93 @@ fn min_max(results: &[(u32, f32)]) -> Option<(f32, f32)> {
     }
     Some((min, max))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rrf_disjoint_lists() {
+        let vec_results = vec![(0, 0.9), (1, 0.8), (2, 0.7)];
+        let kw_results = vec![(3, 5.0), (4, 4.0), (5, 3.0)];
+        let fused = rrf_fusion(&vec_results, &kw_results, 6);
+        assert_eq!(fused.len(), 6);
+        let ids: Vec<u32> = fused.iter().map(|&(id, _)| id).collect();
+        for id in 0..=5 {
+            assert!(ids.contains(&id), "missing id {id} in fused results");
+        }
+    }
+
+    #[test]
+    fn test_rrf_overlapping_boosts_score() {
+        let vec_results = vec![(0, 0.9), (1, 0.8), (2, 0.7)];
+        let kw_results = vec![(1, 5.0), (3, 4.0), (0, 3.0)];
+        let fused = rrf_fusion(&vec_results, &kw_results, 4);
+        // IDs 0 and 1 appear in both lists so should have higher RRF scores
+        let top_ids: Vec<u32> = fused.iter().take(2).map(|&(id, _)| id).collect();
+        assert!(
+            top_ids.contains(&0) || top_ids.contains(&1),
+            "overlapping IDs should rank higher"
+        );
+    }
+
+    #[test]
+    fn test_rrf_empty_inputs() {
+        let fused = rrf_fusion(&[], &[], 10);
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn test_rrf_one_empty() {
+        let vec_results = vec![(0, 0.9), (1, 0.8)];
+        let fused = rrf_fusion(&vec_results, &[], 10);
+        assert_eq!(fused.len(), 2);
+    }
+
+    #[test]
+    fn test_linear_fusion_alpha_1() {
+        let vec_results = vec![(0, 0.9), (1, 0.5)];
+        let kw_results = vec![(2, 10.0), (3, 5.0)];
+        let fused = linear_fusion(&vec_results, &kw_results, 1.0, 10);
+        let top_id = fused[0].0;
+        assert!(
+            top_id == 0 || top_id == 1,
+            "alpha=1.0 should prioritize vector results, got top={top_id}"
+        );
+    }
+
+    #[test]
+    fn test_linear_fusion_alpha_0() {
+        let vec_results = vec![(0, 0.9), (1, 0.5)];
+        let kw_results = vec![(2, 10.0), (3, 5.0)];
+        let fused = linear_fusion(&vec_results, &kw_results, 0.0, 10);
+        let top_id = fused[0].0;
+        assert!(
+            top_id == 2 || top_id == 3,
+            "alpha=0.0 should prioritize keyword results, got top={top_id}"
+        );
+    }
+
+    #[test]
+    fn test_linear_fusion_truncates_to_k() {
+        let vec_results: Vec<(u32, f32)> = (0..20).map(|i| (i, 1.0 - i as f32 / 20.0)).collect();
+        let kw_results: Vec<(u32, f32)> = (20..40)
+            .map(|i| (i, 1.0 - (i - 20) as f32 / 20.0))
+            .collect();
+        let fused = linear_fusion(&vec_results, &kw_results, 0.5, 5);
+        assert_eq!(fused.len(), 5);
+    }
+
+    #[test]
+    fn test_linear_fusion_empty() {
+        let fused = linear_fusion(&[], &[], 0.5, 10);
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn test_min_max_helper() {
+        assert_eq!(min_max(&[]), None);
+        assert_eq!(min_max(&[(0, 3.0), (1, 1.0), (2, 5.0)]), Some((1.0, 5.0)));
+        assert_eq!(min_max(&[(0, 2.0)]), Some((2.0, 2.0)));
+    }
+}

@@ -515,4 +515,94 @@ mod tests {
         let sim = cosine_similarity_ref(qa.as_ref(), qb.as_ref());
         assert!(sim.abs() < 0.15, "orthogonal sim should be ~0, got {sim}");
     }
+
+    #[test]
+    fn test_euclidean_ref_identical() {
+        let v = vec![1.0, 2.0, 3.0, 4.0];
+        let q = QuantizedVector::quantize(&v);
+        let d = euclidean_distance_sq_ref(q.as_ref(), q.as_ref());
+        assert!(d < 0.01, "self euclidean distance should be ~0, got {d}");
+    }
+
+    #[test]
+    fn test_dot_product_ref_self() {
+        let v = vec![1.0, 2.0, 3.0, 4.0];
+        let q = QuantizedVector::quantize(&v);
+        let dp = dot_product_ref(q.as_ref(), q.as_ref());
+        let expected: f32 = v.iter().map(|x| x * x).sum(); // 1+4+9+16=30
+        let rel_err = (dp - expected).abs() / expected;
+        assert!(
+            rel_err < 0.05,
+            "dot product self should be ~{expected}, got {dp}"
+        );
+    }
+
+    #[test]
+    fn test_cosine_asym_self() {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let q = QuantizedVector::quantize(&v);
+        let sim = cosine_similarity_asym(&v, q.as_ref());
+        assert!(
+            sim > 0.98,
+            "asym cosine self-similarity should be ~1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_cosine_asym_prenorm_self() {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let norm_sq: f32 = v.iter().map(|x| x * x).sum();
+        let q = QuantizedVector::quantize(&v);
+        let sim = cosine_similarity_asym_prenorm(&v, q.as_ref(), norm_sq);
+        assert!(
+            sim > 0.98,
+            "asym prenorm cosine self-sim should be ~1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_euclidean_asym_self() {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let q = QuantizedVector::quantize(&v);
+        let d = euclidean_distance_sq_asym(&v, q.as_ref());
+        assert!(
+            d < 0.5,
+            "asym euclidean self-distance should be ~0, got {d}"
+        );
+    }
+
+    #[test]
+    fn test_dot_product_asym_accuracy() {
+        let query = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let stored = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+        let q = QuantizedVector::quantize(&stored);
+        let asym = dot_product_asym(&query, q.as_ref());
+        let exact: f32 = query.iter().zip(stored.iter()).map(|(a, b)| a * b).sum();
+        let rel_err = (asym - exact).abs() / exact.abs().max(1.0);
+        assert!(
+            rel_err < 0.05,
+            "dot product asym error too large: asym={asym}, exact={exact}"
+        );
+    }
+
+    #[test]
+    fn test_quantize_constant_vector() {
+        let v = vec![5.0, 5.0, 5.0, 5.0];
+        let q = QuantizedVector::quantize(&v);
+        assert_eq!(q.scale, 0.0, "constant vector should have scale=0");
+        let d = q.dequantize();
+        for &val in &d {
+            assert!((val - 5.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_vector_ref_as_ref() {
+        let v = vec![0.0, 0.5, 1.0];
+        let q = QuantizedVector::quantize(&v);
+        let vref = q.as_ref();
+        assert_eq!(vref.data.len(), 3);
+        assert_eq!(vref.min, q.min);
+        assert_eq!(vref.scale, q.scale);
+    }
 }

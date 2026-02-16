@@ -60,3 +60,75 @@ pub fn bm25_search(index: &InvertedIndex, query: &str, k: usize) -> Vec<(u32, f3
     results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bm25::inverted_index::InvertedIndex;
+
+    fn build_corpus() -> InvertedIndex {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "rust programming systems language fast");
+        idx.add_document(1, "python programming scripting easy");
+        idx.add_document(2, "java enterprise programming verbose");
+        idx.add_document(3, "rust memory safety zero cost abstractions");
+        idx
+    }
+
+    #[test]
+    fn test_bm25_empty_query() {
+        let idx = build_corpus();
+        let results = bm25_search(&idx, "", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_bm25_empty_index() {
+        let idx = InvertedIndex::new();
+        let results = bm25_search(&idx, "rust", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_bm25_finds_matching_docs() {
+        let idx = build_corpus();
+        let results = bm25_search(&idx, "rust", 10);
+        assert!(!results.is_empty());
+        let ids: Vec<u32> = results.iter().map(|&(id, _)| id).collect();
+        assert!(ids.contains(&0), "doc 0 contains 'rust'");
+        assert!(ids.contains(&3), "doc 3 contains 'rust'");
+    }
+
+    #[test]
+    fn test_bm25_ranking_order() {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "rust rust rust"); // high TF for "rust"
+        idx.add_document(1, "rust programming"); // lower TF
+        let results = bm25_search(&idx, "rust", 10);
+        assert!(results.len() >= 2);
+        assert_eq!(results[0].0, 0, "doc with higher TF should rank first");
+    }
+
+    #[test]
+    fn test_bm25_no_match() {
+        let idx = build_corpus();
+        let results = bm25_search(&idx, "nonexistent_xyz_term", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_bm25_k_truncation() {
+        let idx = build_corpus();
+        let results = bm25_search(&idx, "programming", 2);
+        assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn test_bm25_scores_positive() {
+        let idx = build_corpus();
+        let results = bm25_search(&idx, "rust programming", 10);
+        for &(_, score) in &results {
+            assert!(score > 0.0, "BM25 scores should be positive, got {score}");
+        }
+    }
+}

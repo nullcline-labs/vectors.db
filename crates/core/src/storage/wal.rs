@@ -207,3 +207,164 @@ fn serialize_and_frame(entry: &WalEntry) -> io::Result<Vec<u8>> {
     framed.extend_from_slice(&bytes);
     Ok(framed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+    use crate::hnsw::graph::HnswConfig;
+    use std::collections::HashMap;
+
+    fn tmp_dir() -> String {
+        let id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vdb_test_{id}"));
+        dir.to_string_lossy().to_string()
+    }
+
+    fn cleanup(dir: &str) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_append_and_replay() {
+        let dir = tmp_dir();
+        {
+            let wal = SyncWriteAheadLog::new(&dir).unwrap();
+            wal.append(&WalEntry::CreateCollection {
+                name: "test".into(),
+                dimension: 128,
+                config: HnswConfig::default(),
+            })
+            .unwrap();
+            wal.append(&WalEntry::DeleteCollection {
+                name: "test".into(),
+            })
+            .unwrap();
+
+            let (entries, stats) = wal.replay().unwrap();
+            assert_eq!(stats.success, 2);
+            assert_eq!(stats.skipped, 0);
+            assert_eq!(stats.crc_errors, 0);
+            assert_eq!(entries.len(), 2);
+            match &entries[0] {
+                WalEntry::CreateCollection {
+                    name, dimension, ..
+                } => {
+                    assert_eq!(name, "test");
+                    assert_eq!(*dimension, 128);
+                }
+                _ => panic!("expected CreateCollection"),
+            }
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_insert_document_roundtrip() {
+        let dir = tmp_dir();
+        {
+            let wal = SyncWriteAheadLog::new(&dir).unwrap();
+            let doc = Document::new("hello world".into(), HashMap::new());
+            let doc_id = doc.id;
+            wal.append(&WalEntry::InsertDocument {
+                collection_name: "col1".into(),
+                document: doc,
+                embedding: vec![1.0, 2.0, 3.0],
+            })
+            .unwrap();
+
+            let (entries, stats) = wal.replay().unwrap();
+            assert_eq!(stats.success, 1);
+            match &entries[0] {
+                WalEntry::InsertDocument {
+                    collection_name,
+                    document,
+                    embedding,
+                } => {
+                    assert_eq!(collection_name, "col1");
+                    assert_eq!(document.id, doc_id);
+                    assert_eq!(embedding, &[1.0, 2.0, 3.0]);
+                }
+                _ => panic!("expected InsertDocument"),
+            }
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_truncate_clears_wal() {
+        let dir = tmp_dir();
+        {
+            let wal = SyncWriteAheadLog::new(&dir).unwrap();
+            wal.append(&WalEntry::DeleteCollection { name: "x".into() })
+                .unwrap();
+            wal.truncate().unwrap();
+            let (entries, _) = wal.replay().unwrap();
+            assert!(entries.is_empty(), "WAL should be empty after truncate");
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_crc_corruption_detected() {
+        let dir = tmp_dir();
+        let wal_path;
+        {
+            let wal = SyncWriteAheadLog::new(&dir).unwrap();
+            wal.append(&WalEntry::DeleteCollection { name: "a".into() })
+                .unwrap();
+            wal_path = PathBuf::from(&dir).join("wal.bin");
+        }
+        // Corrupt one byte in the payload
+        let mut data = std::fs::read(&wal_path).unwrap();
+        if data.len() > 10 {
+            data[10] ^= 0xFF;
+        }
+        std::fs::write(&wal_path, &data).unwrap();
+        {
+            let wal = SyncWriteAheadLog::new(&dir).unwrap();
+            let (_entries, stats) = wal.replay().unwrap();
+            // Either CRC error or deserialization failure
+            assert!(
+                stats.crc_errors > 0 || stats.skipped > 0,
+                "corruption should be detected"
+            );
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_freeze_and_truncate() {
+        let dir = tmp_dir();
+        {
+            let wal = SyncWriteAheadLog::new(&dir).unwrap();
+            wal.append(&WalEntry::DeleteCollection { name: "b".into() })
+                .unwrap();
+            let _gate = wal.freeze();
+            wal.truncate().unwrap();
+            // After drop of gate, appends should work again
+        }
+        {
+            let wal = SyncWriteAheadLog::new(&dir).unwrap();
+            wal.append(&WalEntry::DeleteCollection { name: "c".into() })
+                .unwrap();
+            let (entries, _) = wal.replay().unwrap();
+            assert_eq!(entries.len(), 1);
+        }
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_serialize_and_frame_format() {
+        let entry = WalEntry::DeleteCollection {
+            name: "test".into(),
+        };
+        let framed = serialize_and_frame(&entry).unwrap();
+        // First 4 bytes = length (BE), next 4 = CRC32 (BE)
+        let len = u32::from_be_bytes([framed[0], framed[1], framed[2], framed[3]]) as usize;
+        let stored_crc = u32::from_be_bytes([framed[4], framed[5], framed[6], framed[7]]);
+        let payload = &framed[8..];
+        assert_eq!(payload.len(), len);
+        assert_eq!(crc32fast::hash(payload), stored_crc);
+    }
+}

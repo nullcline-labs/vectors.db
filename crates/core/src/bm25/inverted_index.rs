@@ -94,3 +94,82 @@ impl InvertedIndex {
         self.total_doc_length as f32 / self.doc_count as f32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_document_updates_index() {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "the quick brown fox");
+        assert_eq!(idx.doc_count, 1);
+        assert!(idx.index.contains_key("quick"));
+        assert!(idx.index.contains_key("brown"));
+        assert!(idx.index.contains_key("fox"));
+        // "the" is a stop word, should not be indexed
+        assert!(!idx.index.contains_key("the"));
+    }
+
+    #[test]
+    fn test_term_frequency() {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "hello hello hello world");
+        let postings = idx.index.get("hello").unwrap();
+        assert_eq!(postings.len(), 1);
+        assert_eq!(postings[0].term_frequency, 3);
+    }
+
+    #[test]
+    fn test_multiple_documents() {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "rust programming language");
+        idx.add_document(1, "python programming language");
+        assert_eq!(idx.doc_count, 2);
+        let postings = idx.index.get("programming").unwrap();
+        assert_eq!(postings.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_document() {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "hello world");
+        idx.add_document(1, "hello rust");
+        assert_eq!(idx.doc_count, 2);
+        idx.remove_document(0);
+        assert_eq!(idx.doc_count, 1);
+        // "world" only appeared in doc 0, should be gone
+        assert!(!idx.index.contains_key("world"));
+        // "hello" still in doc 1
+        let postings = idx.index.get("hello").unwrap();
+        assert_eq!(postings.len(), 1);
+        assert_eq!(postings[0].doc_id, 1);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_doc() {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "hello world");
+        idx.remove_document(99); // should not panic
+        assert_eq!(idx.doc_count, 1);
+    }
+
+    #[test]
+    fn test_average_doc_length() {
+        let mut idx = InvertedIndex::new();
+        assert_eq!(idx.average_doc_length(), 0.0);
+        idx.add_document(0, "one two three"); // 3 tokens (after stop word removal: depends on which are stop words)
+        idx.add_document(1, "four five six seven eight"); // 5 tokens
+        let avg = idx.average_doc_length();
+        assert!(avg > 0.0, "average doc length should be > 0");
+    }
+
+    #[test]
+    fn test_doc_lengths_tracked() {
+        let mut idx = InvertedIndex::new();
+        idx.add_document(0, "hello world");
+        assert!(idx.doc_lengths[0] > 0);
+        idx.remove_document(0);
+        assert_eq!(idx.doc_lengths[0], 0);
+    }
+}
