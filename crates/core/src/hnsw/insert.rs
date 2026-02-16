@@ -3,7 +3,7 @@
 //! Inserts a vector into the HNSW graph with bidirectional connections and
 //! heuristic neighbor pruning (Algorithm 4 from the HNSW paper).
 //! Uses exact f32-vs-f32 distance when raw vectors are stored,
-//! or asymmetric f32-vs-u8 distance in compact mode.
+//! or cached dequantization + f32-vs-f32 distance in compact mode.
 
 use crate::hnsw::graph::HnswIndex;
 use crate::hnsw::search::search_layer;
@@ -190,7 +190,8 @@ impl HnswIndex {
 /// Prefers diverse neighbors: a candidate is selected only if it is closer to the base node
 /// than to any already-selected neighbor. This avoids redundant clusters of near-identical
 /// neighbors and ensures better graph connectivity, especially for cosine distance.
-/// Uses exact f32-vs-f32 when raw vectors are available, otherwise dequantize + asymmetric.
+/// Uses exact f32-vs-f32 when raw vectors are available, otherwise dequantizes candidates
+/// on-the-fly and caches selected vectors for f32-vs-f32 SIMD distance.
 fn select_neighbors_heuristic(
     index: &HnswIndex,
     candidates: &[(f32, u32)],
@@ -202,7 +203,16 @@ fn select_neighbors_heuristic(
     let mut selected: Vec<(f32, u32)> = Vec::with_capacity(m);
     let metric = index.config.distance_metric;
     let use_exact = index.has_raw_vectors();
-    let mut cid_buf = vec![0.0f32; index.dimension];
+
+    // In compact mode, cache dequantized f32 vectors of selected neighbors
+    // to use fast f32-vs-f32 SIMD distance instead of repeated u8 asymmetric distance.
+    let dim = index.dimension;
+    let mut selected_bufs: Vec<Vec<f32>> = if use_exact {
+        Vec::new()
+    } else {
+        Vec::with_capacity(m)
+    };
+    let mut cid_buf = vec![0.0f32; dim];
 
     for &(dist_to_base, cid) in &sorted {
         if selected.len() >= m {
@@ -218,15 +228,17 @@ fn select_neighbors_heuristic(
             })
         } else {
             index.dequantize_into(cid, &mut cid_buf);
-            selected.iter().all(|&(_, sid)| {
-                let sid_ref = index.get_vector_ref(sid);
-                let dist_to_selected = metric.distance_asym(&cid_buf, sid_ref);
+            selected_bufs.iter().all(|sid_f32| {
+                let dist_to_selected = metric.distance_exact(&cid_buf, sid_f32);
                 dist_to_base <= dist_to_selected
             })
         };
 
         if is_diverse {
             selected.push((dist_to_base, cid));
+            if !use_exact {
+                selected_bufs.push(cid_buf.clone());
+            }
         }
     }
 

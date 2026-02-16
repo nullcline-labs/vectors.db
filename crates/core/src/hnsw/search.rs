@@ -190,6 +190,8 @@ pub fn knn_search(index: &HnswIndex, query: &[f32], k: usize) -> Vec<(f32, u32)>
 
 /// Multi-layer KNN search with a filter predicate applied during graph traversal.
 /// Nodes that don't pass the filter are still used for navigation but excluded from results.
+/// Uses adaptive ef oversampling: if the initial search yields fewer than k results,
+/// retries with progressively larger ef to handle low-selectivity filters.
 pub fn knn_search_filtered<F: Fn(u32) -> bool>(
     index: &HnswIndex,
     query: &[f32],
@@ -236,19 +238,34 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         }
     }
 
-    // Search layer 0 with ef_search — apply filter here
-    let ef = index.config.ef_search.max(k);
-    let mut results = search_layer(
-        index,
-        query,
-        std::slice::from_ref(&current_ep),
-        ef,
-        0,
-        &mut visited,
-        query_norm_sq,
-        filter_fn,
-        pq_table_ref,
-    );
+    // Search layer 0 with ef_search — apply filter here.
+    // Adaptive oversampling: if results < k, retry with larger ef (up to 4x).
+    let base_ef = index.config.ef_search.max(k);
+    let max_ef = (base_ef * 4).min(index.node_count as usize);
+    let mut ef = base_ef;
+    let mut results;
+
+    loop {
+        visited = VisitedSet::new(index.node_count as usize);
+        results = search_layer(
+            index,
+            query,
+            std::slice::from_ref(&current_ep),
+            ef,
+            0,
+            &mut visited,
+            query_norm_sq,
+            filter_fn,
+            pq_table_ref,
+        );
+
+        if results.len() >= k || ef >= max_ef {
+            break;
+        }
+
+        // Double ef for next attempt
+        ef = (ef * 2).min(max_ef);
+    }
 
     // Rerank candidates using exact f32 distance (when available) or asymmetric f32-vs-u8
     if index.has_raw_vectors() {
