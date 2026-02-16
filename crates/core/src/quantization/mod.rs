@@ -4,11 +4,11 @@
 //! achieving 4× memory reduction. Includes SIMD-friendly distance
 //! functions for both symmetric (u8 vs u8) and asymmetric (f32 vs u8) computation.
 
+/// Product Quantization: codebook training, encoding, and asymmetric distance computation.
+pub mod pq;
 /// Scalar quantization: f32 → u8 with min/scale calibration and distance functions.
 pub mod scalar;
 /// SIMD-accelerated distance functions (NEON / AVX2 / scalar fallback).
 pub mod simd;
-/// Product Quantization: codebook training, encoding, and asymmetric distance computation.
-pub mod pq;
 
 pub use scalar::{QuantizedVector, VectorRef};

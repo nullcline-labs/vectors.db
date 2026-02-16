@@ -155,8 +155,7 @@ pub fn search_layer<F: Fn(u32) -> bool>(
                 continue;
             }
 
-            let dist =
-                compute_distance(index, query, neighbor_id, query_norm_sq, exact, pq_table);
+            let dist = compute_distance(index, query, neighbor_id, query_norm_sq, exact, pq_table);
 
             let should_add = results.len() < ef || dist < worst_dist;
 
@@ -210,9 +209,10 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
     let query_norm_sq: f32 = query.iter().map(|&x| x * x).sum();
 
     // Build PQ distance table if codebook is available
-    let pq_table = index.pq_codebook.as_ref().map(|cb| {
-        cb.build_distance_table(query, index.config.distance_metric)
-    });
+    let pq_table = index
+        .pq_codebook
+        .as_ref()
+        .map(|cb| cb.build_distance_table(query, index.config.distance_metric));
     let pq_table_ref = pq_table.as_ref();
 
     // Allocate VisitedSet once, reuse across all layers

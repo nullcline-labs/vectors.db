@@ -233,8 +233,12 @@ impl HnswIndex {
         if m == 0 || self.node_count == 0 {
             return;
         }
-        let codebook =
-            PqCodebook::train(&self.raw_vectors, self.dimension, m, config::PQ_NUM_CENTROIDS);
+        let codebook = PqCodebook::train(
+            &self.raw_vectors,
+            self.dimension,
+            m,
+            config::PQ_NUM_CENTROIDS,
+        );
         self.pq_codes = codebook.encode_batch(&self.raw_vectors, self.dimension);
         self.pq_codebook = Some(codebook);
     }
