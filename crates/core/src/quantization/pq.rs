@@ -31,7 +31,10 @@ impl PqCodebook {
     /// `vectors` is a contiguous arena of n vectors, each `dim` floats.
     /// `m` is the number of subspaces, `k` is the number of centroids (must be 256).
     pub fn train(vectors: &[f32], dim: usize, m: usize, k: usize) -> Self {
-        assert!(dim.is_multiple_of(m), "dimension must be divisible by num_subspaces");
+        assert!(
+            dim.is_multiple_of(m),
+            "dimension must be divisible by num_subspaces"
+        );
         assert!(k == 256, "PQ requires exactly 256 centroids for u8 codes");
         let sub_dim = dim / m;
         let n = vectors.len() / dim;
@@ -56,8 +59,7 @@ impl PqCodebook {
             // Copy centroids (pad with zeros if n < k)
             let out_start = sub * k * sub_dim;
             let copy_len = effective_k * sub_dim;
-            centroids[out_start..out_start + copy_len]
-                .copy_from_slice(&sub_centroids[..copy_len]);
+            centroids[out_start..out_start + copy_len].copy_from_slice(&sub_centroids[..copy_len]);
         }
 
         Self {
@@ -95,11 +97,7 @@ impl PqCodebook {
     /// Build distance lookup table for a query vector and distance metric.
     /// Returns a table of shape [M][K] where table[m*K + k] is the partial
     /// distance from query subvector m to centroid k.
-    pub fn build_distance_table(
-        &self,
-        query: &[f32],
-        metric: DistanceMetric,
-    ) -> PqDistanceTable {
+    pub fn build_distance_table(&self, query: &[f32], metric: DistanceMetric) -> PqDistanceTable {
         let k = self.num_centroids;
         let mut table = vec![0.0f32; self.num_subspaces * k];
 
@@ -179,7 +177,11 @@ impl PqDistanceTable {
         let k = 256;
         let mut dist = 0.0f32;
         for m in 0..self.num_subspaces {
-            dist += unsafe { *self.table.get_unchecked(m * k + *codes.get_unchecked(m) as usize) };
+            dist += unsafe {
+                *self
+                    .table
+                    .get_unchecked(m * k + *codes.get_unchecked(m) as usize)
+            };
         }
         dist
     }
