@@ -659,3 +659,429 @@ impl Database {
             .sum()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{Document, MetadataValue};
+    use crate::filter_types::{FilterClause, FilterCondition, FilterOperator};
+    use crate::hnsw::graph::HnswConfig;
+    use std::collections::HashMap;
+
+    fn make_config() -> HnswConfig {
+        HnswConfig {
+            store_raw_vectors: true,
+            ..HnswConfig::default()
+        }
+    }
+
+    fn make_embedding(dim: usize, seed: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|j| (((seed + 1) * 2654435761 + j * 40503) & 0xFFFF) as f32 / 65535.0)
+            .collect()
+    }
+
+    fn make_doc(text: &str, meta: HashMap<String, MetadataValue>) -> Document {
+        Document::new(text.to_string(), meta)
+    }
+
+    fn meta_kv(k: &str, v: MetadataValue) -> HashMap<String, MetadataValue> {
+        let mut m = HashMap::new();
+        m.insert(k.to_string(), v);
+        m
+    }
+
+    // ── Collection basic CRUD ──────────────────────────────────────────
+
+    #[test]
+    fn test_collection_new() {
+        let col = Collection::new("test".to_string(), 4, make_config());
+        assert_eq!(col.document_count(), 0);
+        assert_eq!(col.deleted_count(), 0);
+    }
+
+    #[test]
+    fn test_insert_and_get_document() {
+        let col = Collection::new("col".to_string(), 4, make_config());
+        let doc = make_doc("hello world", HashMap::new());
+        let id = doc.id;
+        col.insert_document(doc, vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(col.document_count(), 1);
+        let fetched = col.get_document(&id).unwrap();
+        assert_eq!(fetched.id, id);
+        assert_eq!(fetched.text, "hello world");
+    }
+
+    #[test]
+    fn test_get_nonexistent_document() {
+        let col = Collection::new("col".to_string(), 4, make_config());
+        assert!(col.get_document(&Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn test_delete_document() {
+        let col = Collection::new("col".to_string(), 4, make_config());
+        let doc = make_doc("bye", HashMap::new());
+        let id = doc.id;
+        col.insert_document(doc, vec![0.0, 1.0, 0.0, 0.0]);
+        assert!(col.delete_document(&id));
+        assert_eq!(col.document_count(), 0);
+        assert_eq!(col.deleted_count(), 1);
+        assert!(col.get_document(&id).is_none());
+    }
+
+    #[test]
+    fn test_delete_nonexistent_document() {
+        let col = Collection::new("col".to_string(), 4, make_config());
+        assert!(!col.delete_document(&Uuid::new_v4()));
+    }
+
+    // ── Vector search ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_vector_search_basic() {
+        let col = Collection::new("vs".to_string(), 4, make_config());
+        col.insert_document(make_doc("a", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
+        col.insert_document(make_doc("b", HashMap::new()), vec![0.0, 1.0, 0.0, 0.0]);
+        col.insert_document(make_doc("c", HashMap::new()), vec![0.0, 0.0, 1.0, 0.0]);
+
+        let results = col.vector_search(&[1.0, 0.0, 0.0, 0.0], 2, None);
+        assert!(!results.is_empty());
+        assert!(results.len() <= 2);
+        // Nearest to [1,0,0,0] should be "a"
+        assert_eq!(results[0].document.text, "a");
+    }
+
+    #[test]
+    fn test_vector_search_min_similarity() {
+        let col = Collection::new("vs".to_string(), 4, make_config());
+        col.insert_document(make_doc("close", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
+        col.insert_document(make_doc("far", HashMap::new()), vec![-1.0, 0.0, 0.0, 0.0]);
+
+        // With very high min_similarity, "far" should be excluded
+        let results = col.vector_search(&[1.0, 0.0, 0.0, 0.0], 10, Some(0.9));
+        for r in &results {
+            assert!(r.score >= 0.9, "score {} < min 0.9", r.score);
+        }
+    }
+
+    #[test]
+    fn test_vector_search_empty_index() {
+        let col = Collection::new("empty".to_string(), 4, make_config());
+        let results = col.vector_search(&[1.0, 0.0, 0.0, 0.0], 5, None);
+        assert!(results.is_empty());
+    }
+
+    // ── Keyword search ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_keyword_search() {
+        let col = Collection::new("ks".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("rust programming language", HashMap::new()),
+            make_embedding(4, 0),
+        );
+        col.insert_document(
+            make_doc("python programming language", HashMap::new()),
+            make_embedding(4, 1),
+        );
+        col.insert_document(
+            make_doc("database systems", HashMap::new()),
+            make_embedding(4, 2),
+        );
+
+        let results = col.keyword_search("rust programming", 3);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].document.text, "rust programming language");
+    }
+
+    #[test]
+    fn test_keyword_search_no_match() {
+        let col = Collection::new("ks".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("hello world", HashMap::new()),
+            make_embedding(4, 0),
+        );
+        let results = col.keyword_search("nonexistent_query_xyz", 5);
+        assert!(results.is_empty());
+    }
+
+    // ── Hybrid search ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_hybrid_search_rrf() {
+        let col = Collection::new("hs".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("machine learning algorithms", HashMap::new()),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc("deep learning neural networks", HashMap::new()),
+            vec![0.9, 0.1, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc("database indexing systems", HashMap::new()),
+            vec![0.0, 0.0, 1.0, 0.0],
+        );
+
+        let results = col.hybrid_search(
+            Some("machine learning"),
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            3,
+            0.5,
+            "rrf",
+            None,
+        );
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_hybrid_search_linear() {
+        let col = Collection::new("hs".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("alpha text", HashMap::new()),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc("beta text", HashMap::new()),
+            vec![0.0, 1.0, 0.0, 0.0],
+        );
+
+        let results = col.hybrid_search(
+            Some("alpha"),
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            2,
+            0.5,
+            "linear",
+            None,
+        );
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_hybrid_search_vector_only() {
+        let col = Collection::new("hs".to_string(), 4, make_config());
+        col.insert_document(make_doc("hello", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
+
+        let results = col.hybrid_search(None, Some(&[1.0, 0.0, 0.0, 0.0]), 2, 1.0, "rrf", None);
+        // Should work with only vector query
+        assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn test_hybrid_search_keyword_only() {
+        let col = Collection::new("hs".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("hello world", HashMap::new()),
+            make_embedding(4, 0),
+        );
+
+        let results = col.hybrid_search(Some("hello world"), None, 2, 0.0, "rrf", None);
+        assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn test_hybrid_search_min_similarity() {
+        let col = Collection::new("hs".to_string(), 4, make_config());
+        col.insert_document(make_doc("hello", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
+
+        let results = col.hybrid_search(
+            Some("hello"),
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            5,
+            0.5,
+            "rrf",
+            Some(999.0),
+        );
+        assert!(
+            results.is_empty(),
+            "extreme min_similarity should filter all"
+        );
+    }
+
+    // ── Filtered search ────────────────────────────────────────────────
+
+    #[test]
+    fn test_vector_search_filtered() {
+        let col = Collection::new("fs".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc(
+                "cat",
+                meta_kv("type", MetadataValue::String("animal".into())),
+            ),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc(
+                "dog",
+                meta_kv("type", MetadataValue::String("animal".into())),
+            ),
+            vec![0.9, 0.1, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc(
+                "car",
+                meta_kv("type", MetadataValue::String("vehicle".into())),
+            ),
+            vec![0.8, 0.2, 0.0, 0.0],
+        );
+
+        let filter = FilterClause {
+            must: vec![FilterCondition {
+                field: "type".to_string(),
+                op: FilterOperator::Eq,
+                value: Some(serde_json::Value::String("animal".into())),
+                values: None,
+            }],
+            must_not: vec![],
+        };
+
+        let results = col.vector_search_filtered(&[1.0, 0.0, 0.0, 0.0], 5, None, &filter);
+        for r in &results {
+            match r.document.metadata.get("type") {
+                Some(MetadataValue::String(s)) => assert_eq!(s, "animal"),
+                other => panic!("expected String(\"animal\"), got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_hybrid_search_filtered() {
+        let col = Collection::new("hf".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc(
+                "fast car racing",
+                meta_kv("category", MetadataValue::String("sports".into())),
+            ),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc(
+                "fast food restaurant",
+                meta_kv("category", MetadataValue::String("food".into())),
+            ),
+            vec![0.9, 0.1, 0.0, 0.0],
+        );
+
+        let filter = FilterClause {
+            must: vec![FilterCondition {
+                field: "category".to_string(),
+                op: FilterOperator::Eq,
+                value: Some(serde_json::Value::String("sports".into())),
+                values: None,
+            }],
+            must_not: vec![],
+        };
+
+        let results = col.hybrid_search_filtered(
+            Some("fast"),
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            5,
+            0.5,
+            "rrf",
+            None,
+            &filter,
+        );
+        for r in &results {
+            match r.document.metadata.get("category") {
+                Some(MetadataValue::String(s)) => assert_eq!(s, "sports"),
+                other => panic!("expected String(\"sports\"), got {:?}", other),
+            }
+        }
+    }
+
+    // ── Rebuild, memory, deleted_count ──────────────────────────────────
+
+    #[test]
+    fn test_rebuild_indices() {
+        let col = Collection::new("rb".to_string(), 4, make_config());
+        let doc1 = make_doc("keep this", HashMap::new());
+        let doc2 = make_doc("delete this", HashMap::new());
+        let id2 = doc2.id;
+        col.insert_document(doc1, vec![1.0, 0.0, 0.0, 0.0]);
+        col.insert_document(doc2, vec![0.0, 1.0, 0.0, 0.0]);
+        col.delete_document(&id2);
+        assert_eq!(col.document_count(), 1);
+        assert_eq!(col.deleted_count(), 1);
+
+        let rebuilt = col.rebuild_indices();
+        assert_eq!(rebuilt, 1);
+        // After rebuild, deleted count resets to 0
+        assert_eq!(col.deleted_count(), 0);
+        assert_eq!(col.document_count(), 1);
+    }
+
+    #[test]
+    fn test_estimate_memory_bytes() {
+        let col = Collection::new("mem".to_string(), 4, make_config());
+        let before = col.estimate_memory_bytes();
+        col.insert_document(make_doc("hello", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
+        let after = col.estimate_memory_bytes();
+        assert!(after > before, "memory should increase after insert");
+    }
+
+    // ── CollectionData::validate ───────────────────────────────────────
+
+    #[test]
+    fn test_validate_ok() {
+        let col = Collection::new("v".to_string(), 4, make_config());
+        col.insert_document(make_doc("a", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
+        let data = col.data.read();
+        assert!(data.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_dimension_mismatch() {
+        let mut cd = CollectionData::new("bad".to_string(), 4, HnswConfig::default());
+        cd.hnsw_index.dimension = 8; // mismatch
+        assert!(cd.validate().is_err());
+    }
+
+    // ── Database CRUD ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_database_create_and_get() {
+        let db = Database::new();
+        assert!(db.create_collection("c1".into(), 4, None).is_ok());
+        assert!(db.get_collection("c1").is_some());
+        assert!(db.get_collection("nope").is_none());
+    }
+
+    #[test]
+    fn test_database_duplicate_collection() {
+        let db = Database::new();
+        db.create_collection("dup".into(), 4, None).unwrap();
+        let err = db.create_collection("dup".into(), 4, None);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_database_delete_collection() {
+        let db = Database::new();
+        db.create_collection("del".into(), 4, None).unwrap();
+        assert!(db.delete_collection("del"));
+        assert!(!db.delete_collection("del"));
+        assert!(db.get_collection("del").is_none());
+    }
+
+    #[test]
+    fn test_database_list_collections() {
+        let db = Database::new();
+        db.create_collection("a".into(), 4, None).unwrap();
+        db.create_collection("b".into(), 4, None).unwrap();
+        let names = db.list_collections();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"a".to_string()));
+        assert!(names.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_database_total_memory_bytes() {
+        let db = Database::new();
+        db.create_collection("m".into(), 4, None).unwrap();
+        let col = db.get_collection("m").unwrap();
+        col.insert_document(make_doc("hi", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
+        let mem = db.total_memory_bytes();
+        assert!(mem > 0);
+    }
+}

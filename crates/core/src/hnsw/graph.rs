@@ -289,3 +289,229 @@ impl HnswIndex {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quantization::QuantizedVector;
+
+    fn make_index(dim: usize) -> HnswIndex {
+        HnswIndex::new(dim, HnswConfig::default())
+    }
+
+    fn make_raw_index(dim: usize) -> HnswIndex {
+        HnswIndex::new(
+            dim,
+            HnswConfig {
+                store_raw_vectors: true,
+                ..HnswConfig::default()
+            },
+        )
+    }
+
+    fn insert_one(index: &mut HnswIndex, id: u32, raw: &[f32]) {
+        let q = QuantizedVector::quantize(raw);
+        index.push_vector(&q);
+        if index.config.store_raw_vectors {
+            index.push_raw_vector(raw);
+        }
+        index.neighbors.push(vec![Vec::new()]);
+        index.layers.push(0);
+        index.deleted.push(false);
+        index.node_count += 1;
+        if index.entry_point.is_none() {
+            index.entry_point = Some(id);
+        }
+    }
+
+    #[test]
+    fn test_new_empty_index() {
+        let idx = make_index(128);
+        assert_eq!(idx.dimension, 128);
+        assert_eq!(idx.node_count, 0);
+        assert!(idx.is_empty());
+        assert_eq!(idx.len(), 0);
+        assert!(idx.entry_point.is_none());
+    }
+
+    #[test]
+    fn test_with_default_config() {
+        let idx = HnswIndex::with_default_config(64);
+        assert_eq!(idx.dimension, 64);
+        assert!(matches!(idx.config.distance_metric, DistanceMetric::Cosine));
+    }
+
+    #[test]
+    fn test_push_and_get_vector_ref() {
+        let mut idx = make_index(4);
+        let raw = vec![0.5, 0.25, 0.75, 1.0];
+        insert_one(&mut idx, 0, &raw);
+        let vref = idx.get_vector_ref(0);
+        assert_eq!(vref.data.len(), 4);
+        // Dequantized should be close to original
+        let deq: Vec<f32> = vref
+            .data
+            .iter()
+            .map(|&b| vref.min + b as f32 * vref.scale)
+            .collect();
+        for (a, b) in raw.iter().zip(deq.iter()) {
+            assert!((a - b).abs() < 0.02, "deq mismatch: {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn test_raw_vectors() {
+        let mut idx = make_raw_index(4);
+        let raw = vec![1.0, 2.0, 3.0, 4.0];
+        insert_one(&mut idx, 0, &raw);
+        assert!(idx.has_raw_vectors());
+        assert_eq!(idx.get_raw_vector(0), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_no_raw_vectors() {
+        let idx = make_index(4);
+        assert!(!idx.has_raw_vectors());
+    }
+
+    #[test]
+    fn test_free_raw_vectors() {
+        let mut idx = make_raw_index(4);
+        insert_one(&mut idx, 0, &[1.0, 2.0, 3.0, 4.0]);
+        assert!(idx.has_raw_vectors());
+        idx.free_raw_vectors();
+        assert!(!idx.has_raw_vectors());
+        assert!(idx.raw_vectors.is_empty());
+    }
+
+    #[test]
+    fn test_dequantize_into() {
+        let mut idx = make_index(4);
+        let raw = vec![0.1, 0.5, 0.9, 0.3];
+        insert_one(&mut idx, 0, &raw);
+        let mut buf = vec![0.0f32; 4];
+        idx.dequantize_into(0, &mut buf);
+        for (a, b) in raw.iter().zip(buf.iter()) {
+            assert!((a - b).abs() < 0.02, "deq mismatch: {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn test_mark_deleted() {
+        let mut idx = make_index(4);
+        insert_one(&mut idx, 0, &[1.0, 0.0, 0.0, 0.0]);
+        insert_one(&mut idx, 1, &[0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(idx.len(), 2);
+        assert!(!idx.is_deleted(0));
+        assert!(idx.mark_deleted(0));
+        assert!(idx.is_deleted(0));
+        assert_eq!(idx.len(), 1);
+        // Out-of-bounds mark_deleted returns false
+        assert!(!idx.mark_deleted(99));
+    }
+
+    #[test]
+    fn test_get_layer() {
+        let mut idx = make_index(4);
+        insert_one(&mut idx, 0, &[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(idx.get_layer(0), 0);
+    }
+
+    #[test]
+    fn test_random_level() {
+        let idx = make_index(4);
+        // Just check it doesn't panic and respects max_layers
+        for _ in 0..100 {
+            let level = idx.random_level();
+            assert!(level < idx.config.max_layers);
+        }
+    }
+
+    #[test]
+    fn test_prefetch_no_panic() {
+        let mut idx = make_raw_index(4);
+        insert_one(&mut idx, 0, &[1.0, 0.0, 0.0, 0.0]);
+        // Just exercise prefetch — no crash = pass
+        idx.prefetch_vector(0);
+        idx.prefetch_raw_vector(0);
+    }
+
+    #[test]
+    fn test_prefetch_large_dim() {
+        let mut idx = make_raw_index(128);
+        let raw: Vec<f32> = (0..128).map(|i| i as f32 / 128.0).collect();
+        insert_one(&mut idx, 0, &raw);
+        // Exercises the second-cache-line prefetch branch (dim > 64 / dim > 16)
+        idx.prefetch_vector(0);
+        idx.prefetch_raw_vector(0);
+    }
+
+    #[test]
+    fn test_train_pq_with_raw_vectors() {
+        let dim = 16;
+        let mut idx = HnswIndex::new(
+            dim,
+            HnswConfig {
+                store_raw_vectors: true,
+                pq_subspaces: 2,
+                ..HnswConfig::default()
+            },
+        );
+        // Need > 256 vectors for meaningful PQ training
+        for i in 0..300u32 {
+            let raw: Vec<f32> = (0..dim)
+                .map(|j| ((i as usize * 7 + j * 13) % 97) as f32 / 97.0)
+                .collect();
+            insert_one(&mut idx, i, &raw);
+        }
+        idx.train_pq();
+        assert!(idx.pq_codebook.is_some());
+        assert_eq!(idx.pq_codes.len(), 300 * 2);
+        let codes = idx.get_pq_codes(0);
+        assert_eq!(codes.len(), 2);
+    }
+
+    #[test]
+    fn test_train_pq_without_raw_dequantizes() {
+        let dim = 16;
+        let mut idx = HnswIndex::new(
+            dim,
+            HnswConfig {
+                store_raw_vectors: false,
+                pq_subspaces: 2,
+                ..HnswConfig::default()
+            },
+        );
+        for i in 0..300u32 {
+            let raw: Vec<f32> = (0..dim)
+                .map(|j| ((i as usize * 7 + j * 13) % 97) as f32 / 97.0)
+                .collect();
+            insert_one(&mut idx, i, &raw);
+        }
+        idx.train_pq();
+        assert!(idx.pq_codebook.is_some());
+        assert_eq!(idx.pq_codes.len(), 300 * 2);
+    }
+
+    #[test]
+    fn test_train_pq_noop_when_disabled() {
+        let mut idx = make_index(4);
+        insert_one(&mut idx, 0, &[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(idx.config.pq_subspaces, 0);
+        idx.train_pq();
+        assert!(idx.pq_codebook.is_none());
+    }
+
+    #[test]
+    fn test_train_pq_noop_when_empty() {
+        let mut idx = HnswIndex::new(
+            8,
+            HnswConfig {
+                pq_subspaces: 2,
+                ..HnswConfig::default()
+            },
+        );
+        idx.train_pq();
+        assert!(idx.pq_codebook.is_none());
+    }
+}

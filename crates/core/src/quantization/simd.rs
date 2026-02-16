@@ -731,3 +731,298 @@ unsafe fn avx2_dot_product_asym(query: &[f32], stored: VectorRef<'_>) -> f32 {
     }
     sum
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quantization::scalar::VectorRef;
+    use crate::quantization::QuantizedVector;
+
+    fn make_query(dim: usize, seed: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|j| ((seed + 1) * 2654435761 + j * 40503) as f32 / u32::MAX as f32)
+            .collect()
+    }
+
+    fn quantize_for_ref(raw: &[f32]) -> QuantizedVector {
+        QuantizedVector::quantize(raw)
+    }
+
+    // ── f32 vs f32 dispatch functions ──────────────────────────────────
+
+    #[test]
+    fn test_cosine_f32_identical() {
+        let a = make_query(128, 0);
+        let sim = cosine_f32(&a, &a);
+        assert!(
+            (sim - 1.0).abs() < 1e-5,
+            "cosine of identical vectors should be ~1.0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_f32_orthogonal() {
+        let mut a = vec![0.0f32; 32];
+        let mut b = vec![0.0f32; 32];
+        a[0] = 1.0;
+        b[1] = 1.0;
+        let sim = cosine_f32(&a, &b);
+        assert!(
+            sim.abs() < 1e-5,
+            "orthogonal cosine should be ~0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_f32_opposite() {
+        let a: Vec<f32> = (0..64).map(|i| i as f32).collect();
+        let b: Vec<f32> = a.iter().map(|x| -x).collect();
+        let sim = cosine_f32(&a, &b);
+        assert!(
+            (sim + 1.0).abs() < 1e-5,
+            "opposite vectors cosine should be ~-1, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_euclidean_sq_f32_self() {
+        let a = make_query(128, 1);
+        let d = euclidean_sq_f32(&a, &a);
+        assert!(d.abs() < 1e-5, "self euclidean should be ~0, got {}", d);
+    }
+
+    #[test]
+    fn test_euclidean_sq_f32_known() {
+        let a = vec![1.0, 0.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0, 0.0];
+        let d = euclidean_sq_f32(&a, &b);
+        assert!((d - 2.0).abs() < 1e-5, "expected 2.0, got {}", d);
+    }
+
+    #[test]
+    fn test_dot_product_f32_self() {
+        let a: Vec<f32> = (0..64).map(|i| (i as f32) / 64.0).collect();
+        let expected: f32 = a.iter().map(|x| x * x).sum();
+        let result = dot_product_f32(&a, &a);
+        assert!(
+            (result - expected).abs() < 1e-3,
+            "dot self: {} vs {}",
+            result,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_dot_product_f32_orthogonal() {
+        let mut a = vec![0.0f32; 32];
+        let mut b = vec![0.0f32; 32];
+        a[0] = 1.0;
+        b[1] = 1.0;
+        let d = dot_product_f32(&a, &b);
+        assert!(d.abs() < 1e-6, "orthogonal dot should be 0, got {}", d);
+    }
+
+    // ── non-aligned dimensions (exercises scalar tail) ─────────────────
+
+    #[test]
+    fn test_cosine_f32_non_aligned() {
+        // 19 is not divisible by 16
+        let a = make_query(19, 2);
+        let b = make_query(19, 3);
+        let sim = cosine_f32(&a, &b);
+        assert!(sim > -1.0 && sim < 1.0);
+    }
+
+    #[test]
+    fn test_euclidean_sq_f32_non_aligned() {
+        let a = make_query(7, 4);
+        let b = make_query(7, 5);
+        let d = euclidean_sq_f32(&a, &b);
+        assert!(d >= 0.0, "euclidean sq should be non-negative, got {}", d);
+    }
+
+    // ── Asymmetric dispatch functions (f32 vs u8) ──────────────────────
+
+    #[test]
+    fn test_cosine_asym_prenorm_self() {
+        let raw = make_query(128, 10);
+        let q = quantize_for_ref(&raw);
+        let vref = VectorRef {
+            data: &q.data,
+            min: q.min,
+            scale: q.scale,
+        };
+        let norm_sq: f32 = raw.iter().map(|x| x * x).sum();
+        let sim = cosine_asym_prenorm(&raw, vref, norm_sq);
+        assert!(sim > 0.95, "asym cosine self should be high, got {}", sim);
+    }
+
+    #[test]
+    fn test_cosine_asym_wrapper() {
+        let raw = make_query(64, 11);
+        let q = quantize_for_ref(&raw);
+        let vref = VectorRef {
+            data: &q.data,
+            min: q.min,
+            scale: q.scale,
+        };
+        let sim = cosine_asym(&raw, vref);
+        assert!(sim > 0.95, "cosine_asym self should be high, got {}", sim);
+    }
+
+    #[test]
+    fn test_euclidean_sq_asym_self() {
+        let raw = make_query(128, 12);
+        let q = quantize_for_ref(&raw);
+        let vref = VectorRef {
+            data: &q.data,
+            min: q.min,
+            scale: q.scale,
+        };
+        let d = euclidean_sq_asym(&raw, vref);
+        // Quantization error means it won't be exactly 0
+        assert!(d < 0.5, "asym euclidean self should be small, got {}", d);
+    }
+
+    #[test]
+    fn test_dot_product_asym_self() {
+        let raw = make_query(128, 13);
+        let q = quantize_for_ref(&raw);
+        let vref = VectorRef {
+            data: &q.data,
+            min: q.min,
+            scale: q.scale,
+        };
+        let exact_dot: f32 = raw.iter().map(|x| x * x).sum();
+        let asym_dot = dot_product_asym(&raw, vref);
+        let rel_err = (exact_dot - asym_dot).abs() / exact_dot.max(1e-10);
+        assert!(
+            rel_err < 0.1,
+            "asym dot product relative error too high: {}",
+            rel_err
+        );
+    }
+
+    // ── Asymmetric with non-aligned dim ────────────────────────────────
+
+    #[test]
+    fn test_cosine_asym_non_aligned() {
+        let raw = make_query(19, 14);
+        let q = quantize_for_ref(&raw);
+        let vref = VectorRef {
+            data: &q.data,
+            min: q.min,
+            scale: q.scale,
+        };
+        let sim = cosine_asym(&raw, vref);
+        assert!(
+            sim > 0.9,
+            "non-aligned asym cosine self should be high, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_euclidean_sq_asym_non_aligned() {
+        let raw = make_query(13, 15);
+        let q = quantize_for_ref(&raw);
+        let vref = VectorRef {
+            data: &q.data,
+            min: q.min,
+            scale: q.scale,
+        };
+        let d = euclidean_sq_asym(&raw, vref);
+        assert!(
+            d < 0.5,
+            "non-aligned asym euclidean self should be small, got {}",
+            d
+        );
+    }
+
+    // ── Edge cases ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cosine_f32_zero_vector() {
+        let zero = vec![0.0f32; 32];
+        let a = make_query(32, 20);
+        let sim = cosine_f32(&zero, &a);
+        assert!(
+            sim.abs() < 1e-5,
+            "cosine with zero vector should be 0, got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_asym_prenorm_zero_scale() {
+        // Constant vector → scale = 0
+        let raw = vec![0.5f32; 64];
+        let q = quantize_for_ref(&raw);
+        let vref = VectorRef {
+            data: &q.data,
+            min: q.min,
+            scale: q.scale,
+        };
+        let norm_sq: f32 = raw.iter().map(|x| x * x).sum();
+        // scale == 0 means the SIMD function should return 0.0
+        if vref.scale == 0.0 {
+            let sim = cosine_asym_prenorm(&raw, vref, norm_sq);
+            assert!(
+                sim.abs() < 1e-5,
+                "zero-scale cosine should be 0, got {}",
+                sim
+            );
+        }
+    }
+
+    // ── SIMD vs scalar consistency (large dim) ─────────────────────────
+
+    #[test]
+    fn test_cosine_f32_large_dim_vs_scalar() {
+        let a = make_query(768, 30);
+        let b = make_query(768, 31);
+        let simd_result = cosine_f32(&a, &b);
+        let scalar_result = scalar_cosine_f32(&a, &b);
+        assert!(
+            (simd_result - scalar_result).abs() < 1e-4,
+            "SIMD vs scalar mismatch: {} vs {}",
+            simd_result,
+            scalar_result
+        );
+    }
+
+    #[test]
+    fn test_euclidean_sq_f32_large_dim_vs_scalar() {
+        let a = make_query(768, 32);
+        let b = make_query(768, 33);
+        let simd_result = euclidean_sq_f32(&a, &b);
+        let scalar_result = scalar_euclidean_sq_f32(&a, &b);
+        let rel_err = (simd_result - scalar_result).abs() / simd_result.max(1e-10);
+        assert!(
+            rel_err < 1e-4,
+            "euclidean SIMD vs scalar: {} vs {} (rel_err={})",
+            simd_result,
+            scalar_result,
+            rel_err
+        );
+    }
+
+    #[test]
+    fn test_dot_product_f32_large_dim_vs_scalar() {
+        let a = make_query(768, 34);
+        let b = make_query(768, 35);
+        let simd_result = dot_product_f32(&a, &b);
+        let scalar_result = scalar_dot_product_f32(&a, &b);
+        let rel_err = (simd_result - scalar_result).abs() / simd_result.abs().max(1e-10);
+        assert!(
+            rel_err < 1e-4,
+            "dot SIMD vs scalar: {} vs {} (rel_err={})",
+            simd_result,
+            scalar_result,
+            rel_err
+        );
+    }
+}
