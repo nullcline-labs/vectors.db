@@ -231,6 +231,25 @@ Build: 1,483 inserts/s
 
 Compact mode uses **5x less memory** with only ~0.7% recall loss. Exact mode matches hnsw(nmslib) at 0.9989 recall.
 
+#### High-dimensional (768d, 1536d)
+
+Synthetic data at LLM embedding dimensions. Compact vs exact at ef_search=400:
+
+| Dimension | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
+|-----------|---------------|--------------|-------------|-----------|
+| 768d (100K) | 0.9860 | 0.9993 | 1,392 | 1,156 |
+| 1536d (25K) | 0.9880 | 1.0000 | 1,474 | 1,278 |
+
+At high dimensions, exact mode is strongly recommended (+1.3% recall, 6x faster build).
+
+#### Filtered search & concurrency
+
+| Benchmark | Result |
+|-----------|--------|
+| Filtered 50% selectivity | 0.9914 recall, 821 QPS |
+| Filtered 1% selectivity | 0.9953 recall, 39 QPS |
+| 8-thread concurrent | 6,168 QPS (3.84x speedup) |
+
 Run benchmarks:
 
 ```bash

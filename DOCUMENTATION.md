@@ -1329,13 +1329,15 @@ vectors.db includes a comprehensive benchmark suite using standard ANN-Benchmark
 
 Results on Apple Silicon (M-series), single-threaded, compact mode (`store_raw_vectors=false`):
 
-| Dataset | Vectors | Dimensions | Metric | Recall@10 | QPS | Memory |
-|---------|---------|------------|--------|-----------|-----|--------|
-| GloVe-25 | 1,183,514 | 25 | Cosine | 0.99+ | ~10,000 | — |
-| GloVe-100 | 1,000,000 | 100 | Cosine | 0.99+ | ~5,000 | — |
-| SIFT-128 | 1,000,000 | 128 | Euclidean | 0.9916 | 868–6,177 | 122 MB |
+| Dataset | Vectors | Dimensions | Metric | Recall@10 (ef=400) | QPS (ef=200) | Memory |
+|---------|---------|------------|--------|--------------------|-------------|--------|
+| GloVe-25 | 1.2M | 25 | Cosine | 0.99+ | ~10,000 | — |
+| GloVe-100 | 1M | 100 | Cosine | 0.99+ | ~5,000 | — |
+| SIFT-128 | 1M | 128 | Euclidean | 0.9916 | 1,750 | 122 MB |
+| Synthetic-768 | 100K | 768 | Cosine | 0.9860 | 1,792 | 73 MB |
+| Synthetic-1536 | 25K | 1536 | Cosine | 0.9880 | 1,877 | 37 MB |
 
-With exact mode (`store_raw_vectors=true`), SIFT-128 recall reaches **0.9989** at ef_search=400 (610 MB).
+With exact mode (`store_raw_vectors=true`): SIFT-128 reaches **0.9989**, 768d reaches **0.9993**, 1536d reaches **1.0000** recall at ef_search=400.
 
 #### GloVe-25 (Cosine, 1.18M vectors, 25 dimensions)
 
@@ -1464,6 +1466,72 @@ The NFCorpus dataset from the BEIR benchmark suite is a biomedical information r
 
 > **Note**: vectors.db uses a simple whitespace tokenizer without stemming or stop word removal. Adding language-specific preprocessing would likely push nDCG closer to the 0.32+ range.
 
+### High-Dimensional Benchmarks (768d, 1536d)
+
+Synthetic clustered Gaussian data with brute-force ground truth. Tests vectors.db at dimensions used by real LLM embedding models (OpenAI, Cohere, BGE).
+
+#### 768d (100K vectors, Cosine) — OpenAI ada-002 / BGE / E5 dimensions
+
+| ef_search | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
+|-----------|---------------|--------------|-------------|-----------|
+| 40 | 0.7615 | 0.7628 | 4,135 | 3,060 |
+| 80 | 0.9039 | 0.9078 | 2,745 | 1,966 |
+| 120 | 0.9495 | 0.9557 | 2,256 | 1,890 |
+| 200 | 0.9746 | 0.9879 | 1,792 | 1,445 |
+| 400 | 0.9860 | 0.9993 | 1,392 | 1,156 |
+
+Memory: Compact 73 MB, Exact 366 MB (5x). Build: Compact 92 ins/s, Exact 522 ins/s.
+
+#### 1536d (25K vectors, Cosine) — OpenAI text-embedding-3-large dimensions
+
+| ef_search | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
+|-----------|---------------|--------------|-------------|-----------|
+| 40 | 0.8880 | 0.8922 | 2,898 | 2,850 |
+| 80 | 0.9634 | 0.9732 | 2,224 | 2,148 |
+| 120 | 0.9802 | 0.9912 | 2,071 | 1,902 |
+| 200 | 0.9868 | 0.9984 | 1,877 | 1,630 |
+| 400 | 0.9880 | 1.0000 | 1,474 | 1,278 |
+
+Memory: Compact 37 MB, Exact 183 MB (5x). Build: Compact 54 ins/s, Exact 335 ins/s.
+
+> **Key finding**: At high dimensions, exact mode provides significantly better recall than compact mode (+1.3% at 768d, +1.2% at 1536d, ef_search=400). Exact mode also builds **6x faster** at 768d because f32 distance computation yields a better graph structure during construction, reducing backtracking. For high-dimensional LLM embeddings, `store_raw_vectors=true` is strongly recommended if RAM permits.
+
+### Filtered Search Benchmark
+
+Tests HNSW recall and throughput under metadata filters at various selectivities. Uses SIFT-128 (1M vectors) with synthetic categorical metadata.
+
+| Filter | Selectivity | Recall@10 | QPS | Avg Latency |
+|--------|------------|-----------|-----|-------------|
+| No filter (baseline) | 100% | 0.9913 | 681 | 1.5 ms |
+| category < 5 | ~50% | 0.9914 | 821 | 1.2 ms |
+| category == 0 | ~10% | 0.9930 | 264 | 3.8 ms |
+| region == 0 | ~1% | 0.9953 | 39 | 25.6 ms |
+
+> **Key finding**: Recall remains excellent (>0.99) at all selectivities, even at 1%. QPS degrades at low selectivity because HNSW must traverse more of the graph to find enough matching candidates. At 50% selectivity, filtered search is actually *faster* than unfiltered because fewer candidates pass the reranking stage.
+
+### Concurrent Throughput Benchmark
+
+Tests how search throughput scales with multiple threads. Uses SIFT-128 (1M vectors), read-only concurrent access via `Arc<HnswIndex>`.
+
+#### Single-thread baseline
+
+| ef_search | QPS | Avg Latency | p50 | p95 | p99 |
+|-----------|-----|-------------|-----|-----|-----|
+| 50 | 2,502 | 399 us | 328 us | 749 us | 1,322 us |
+| 100 | 1,614 | 619 us | 483 us | 1,365 us | 2,212 us |
+| 200 | 1,501 | 666 us | 658 us | 866 us | 1,145 us |
+
+#### Multi-thread scaling (ef_search=200)
+
+| Threads | Agg QPS | Speedup | Avg Latency | p50 | p95 | p99 |
+|---------|---------|---------|-------------|-----|-----|-----|
+| 1 | 1,607 | 1.00x | 621 us | 620 us | 803 us | 937 us |
+| 2 | 2,885 | 1.80x | 692 us | 658 us | 1.0 ms | 1.9 ms |
+| 4 | 4,826 | 3.00x | 814 us | 706 us | 1.4 ms | 1.9 ms |
+| 8 | 6,168 | 3.84x | 1,257 us | 783 us | 3.3 ms | 9.4 ms |
+
+> **Key finding**: HNSW search scales nearly linearly up to 4 threads (3.0x speedup). At 8 threads, scaling is 3.84x due to L2/L3 cache contention and memory bandwidth saturation. Search is fully lock-free — no mutexes or atomics are needed for read-only concurrent access. Tail latency (p99) increases at higher thread counts due to cache pressure.
+
 ### Running benchmarks
 
 ```bash
@@ -1474,10 +1542,13 @@ cd benchmarks && python convert_hdf5.py && cd ..
 cargo bench
 
 # Run individual benchmarks
-cargo bench --bench ann_glove25     # GloVe 25d cosine
-cargo bench --bench ann_glove100    # GloVe 100d cosine
-cargo bench --bench ann_sift128     # SIFT 128d euclidean
-cargo bench --bench bm25_nfcorpus   # NFCorpus BM25
+cargo bench --bench ann_glove25            # GloVe 25d cosine
+cargo bench --bench ann_glove100           # GloVe 100d cosine
+cargo bench --bench ann_sift128            # SIFT 128d euclidean (compact vs exact)
+cargo bench --bench ann_highdim            # Synthetic 768d + 1536d (compact vs exact)
+cargo bench --bench ann_filtered           # Filtered search (SIFT-128 + metadata)
+cargo bench --bench concurrent_throughput  # Multi-thread QPS scaling
+cargo bench --bench bm25_nfcorpus          # NFCorpus BM25
 ```
 
 Each benchmark prints:
