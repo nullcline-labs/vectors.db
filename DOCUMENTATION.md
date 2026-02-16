@@ -228,10 +228,11 @@ db = vectorsdb.VectorDB(data_dir="./data")   # with WAL persistence
 db.create_collection(
     "my_collection",
     dimension=768,
-    m=16,                    # optional, default 16
-    ef_construction=200,     # optional, default 200
-    ef_search=50,            # optional, default 50
-    distance_metric="cosine" # optional: "cosine", "euclidean", "dot_product"
+    m=16,                         # optional, default 16
+    ef_construction=200,          # optional, default 200
+    ef_search=50,                 # optional, default 50
+    distance_metric="cosine",     # optional: "cosine", "euclidean", "dot_product"
+    store_raw_vectors=False       # optional: True for +0.7% recall, +59% RAM
 )
 ```
 
@@ -243,6 +244,7 @@ db.create_collection(
 | `ef_construction` | `int | None` | `200` | HNSW build-time search width. |
 | `ef_search` | `int | None` | `50` | HNSW query-time search width. |
 | `distance_metric` | `str | None` | `"cosine"` | Distance metric. |
+| `store_raw_vectors` | `bool | None` | `False` | Store raw f32 vectors for exact reranking. |
 
 Raises `ValueError` if the name already exists or the metric is unknown.
 
@@ -564,6 +566,7 @@ Returns Prometheus-formatted metrics. See [Observability](#11-observability) for
 | `ef_construction` | No | `200` | HNSW build-time candidate list size (10–2000). Higher = better graph quality, slower build. |
 | `ef_search` | No | `50` | HNSW search-time candidate list size (10–2000). Higher = better recall, slower queries. |
 | `distance_metric` | No | `"cosine"` | `"cosine"`, `"euclidean"`, or `"dot"` / `"dot_product"`. |
+| `store_raw_vectors` | No | `false` | When `true`, stores raw f32 vectors for exact distance reranking. Improves recall by ~0.7% but increases RAM by ~59%. Default `false` (compact mode). |
 
 Response (201):
 
@@ -1268,16 +1271,19 @@ Graph Structure:
 
 ### Scalar quantization
 
-Vectors are stored in two forms:
+All vectors are scalar-quantized to u8 for 4x memory reduction vs f32:
 
-1. **Quantized (u8)**: Used for fast neighbor traversal during graph search. 4x memory reduction vs f32.
-2. **Raw (f32)**: Used for exact reranking of the final candidates.
+- **Encode**: `u8 = round((f32 - min) / (max - min) * 255)`
+- **Decode**: `f32 = u8 * scale + min`
 
-Quantization formula:
-- Encode: `u8 = round((f32 - min) / (max - min) * 255)`
-- Decode: `f32 = u8 * scale + min`
+#### Two storage modes
 
-Distance computation uses **asymmetric distance**: the query vector stays as f32 while stored vectors are u8. This preserves query precision while saving memory on the stored side.
+| Mode | `store_raw_vectors` | Memory | Recall | Description |
+|------|---------------------|--------|--------|-------------|
+| **Compact** (default) | `false` | ~342 MB/1M×128d | ~0.990 | Only u8 quantized vectors stored. Asymmetric f32-query-vs-u8-stored distance for search and reranking. |
+| **Exact** | `true` | ~830 MB/1M×128d | ~0.997 | Raw f32 vectors stored alongside u8. Exact f32-vs-f32 distance for search, construction, and reranking. |
+
+In both modes, distance computation uses **asymmetric distance** during graph traversal: the query vector stays as f32 while stored vectors are accessed as u8 (compact) or f32 (exact). This preserves query precision while saving memory on the stored side.
 
 ### BM25 Index
 
@@ -1446,15 +1452,25 @@ Each benchmark prints:
 
 ### Memory efficiency
 
-Thanks to scalar quantization, vectors.db uses approximately **4x less memory** than systems storing full f32 vectors:
+vectors.db offers two storage modes controlled by the `store_raw_vectors` flag:
 
-| Vectors | Dimensions | f32 storage | vectors.db (u8 + f32 raw) | Savings |
-|---------|------------|-------------|---------------------------|---------|
-| 1M | 128 | 488 MB | ~244 MB (u8 index + f32 rerank) | ~2x |
-| 1M | 768 | 2.9 GB | ~1.5 GB | ~2x |
-| 10M | 384 | 14.3 GB | ~7.5 GB | ~2x |
+**Compact mode** (`store_raw_vectors: false`, default) — maximum memory savings:
 
-The u8 quantized vectors are used for fast HNSW graph traversal, while original f32 vectors are kept for exact reranking of the final top-k candidates.
+| Vectors | Dimensions | f32 storage | vectors.db (u8 only) | Savings |
+|---------|------------|-------------|----------------------|---------|
+| 1M | 128 | 488 MB | ~122 MB | ~4x |
+| 1M | 768 | 2.9 GB | ~750 MB | ~4x |
+| 10M | 384 | 14.3 GB | ~3.6 GB | ~4x |
+
+**Exact mode** (`store_raw_vectors: true`) — maximum recall:
+
+| Vectors | Dimensions | f32 storage | vectors.db (u8 + f32) | Savings |
+|---------|------------|-------------|----------------------|---------|
+| 1M | 128 | 488 MB | ~610 MB (u8 + f32) | ~0.8x |
+| 1M | 768 | 2.9 GB | ~3.6 GB | ~0.8x |
+| 10M | 384 | 14.3 GB | ~17.9 GB | ~0.8x |
+
+Compact mode uses u8 quantized vectors with asymmetric f32-vs-u8 distance for all operations. Exact mode additionally stores raw f32 vectors for exact distance computation during search, reranking, and graph construction. The trade-off is ~0.7% recall improvement at ~59% more RAM.
 
 ---
 
@@ -1491,6 +1507,7 @@ The u8 quantized vectors are used for fast HNSW graph traversal, while original 
 | HNSW ef_construction | 200 |
 | HNSW ef_search | 50 |
 | HNSW max layers | 16 |
+| HNSW store_raw_vectors | `false` (compact mode) |
 | BM25 k1 | 1.2 |
 | BM25 b | 0.75 |
 | RRF k | 60.0 |

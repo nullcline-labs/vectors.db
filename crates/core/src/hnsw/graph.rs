@@ -29,6 +29,10 @@ pub struct HnswConfig {
     pub distance_metric: DistanceMetric,
     /// Number of PQ subspaces (0 = PQ disabled, use scalar quantization only).
     pub pq_subspaces: usize,
+    /// When true, stores raw f32 vectors for exact reranking (+0.7% recall, +59% RAM).
+    /// When false (default), uses only scalar-quantized u8 vectors (compact mode).
+    #[serde(default)]
+    pub store_raw_vectors: bool,
 }
 
 impl Default for HnswConfig {
@@ -41,6 +45,7 @@ impl Default for HnswConfig {
             max_layers: config::HNSW_DEFAULT_MAX_LAYERS,
             distance_metric: DistanceMetric::Cosine,
             pq_subspaces: config::PQ_DEFAULT_SUBSPACES,
+            store_raw_vectors: false,
         }
     }
 }
@@ -54,7 +59,7 @@ pub struct HnswIndex {
     pub vector_data: Vec<u8>,
     pub vector_min: Vec<f32>,
     pub vector_scale: Vec<f32>,
-    // SoA: raw f32 vector arena (legacy, no longer populated; kept for serde compat)
+    // SoA: raw f32 vector arena (populated only when store_raw_vectors=true)
     #[serde(default)]
     pub raw_vectors: Vec<f32>,
     // SoA: graph structure
@@ -166,6 +171,25 @@ impl HnswIndex {
         self.vector_scale.push(vector.scale);
     }
 
+    /// Store a raw f32 vector in the arena (only when store_raw_vectors=true).
+    pub fn push_raw_vector(&mut self, raw: &[f32]) {
+        self.raw_vectors.extend_from_slice(raw);
+    }
+
+    /// Get a raw f32 vector slice for the given node.
+    /// Only valid when raw_vectors are populated (store_raw_vectors=true).
+    #[inline]
+    pub fn get_raw_vector(&self, id: u32) -> &[f32] {
+        let start = id as usize * self.dimension;
+        &self.raw_vectors[start..start + self.dimension]
+    }
+
+    /// Returns true if raw f32 vectors are available for exact distance computation.
+    #[inline]
+    pub fn has_raw_vectors(&self) -> bool {
+        !self.raw_vectors.is_empty()
+    }
+
     /// Dequantize a node's vector into the provided buffer (no allocation).
     #[inline]
     pub fn dequantize_into(&self, id: u32, buf: &mut [f32]) {
@@ -201,6 +225,15 @@ impl HnswIndex {
         }
     }
 
+    /// Prefetch raw f32 vector data for a node into L1 cache.
+    #[inline(always)]
+    pub fn prefetch_raw_vector(&self, id: u32) {
+        let start = id as usize * self.dimension;
+        if start < self.raw_vectors.len() {
+            prefetch_read(unsafe { self.raw_vectors.as_ptr().add(start) as *const u8 });
+        }
+    }
+
     /// Get PQ codes for a node (M bytes).
     #[inline]
     pub fn get_pq_codes(&self, id: u32) -> &[u8] {
@@ -221,22 +254,28 @@ impl HnswIndex {
     }
 
     /// Train PQ codebook on current vectors and encode all nodes.
-    /// Dequantizes from scalar quantization into a temporary buffer for training.
+    /// Uses raw f32 vectors when available, otherwise dequantizes from scalar quantization.
     /// Does nothing if pq_subspaces is 0 or the index is empty.
     pub fn train_pq(&mut self) {
         let m = self.config.pq_subspaces;
         if m == 0 || self.node_count == 0 {
             return;
         }
-        // Dequantize all vectors into a transient buffer for PQ training
         let n = self.node_count as usize;
         let dim = self.dimension;
-        let mut deq = vec![0.0f32; n * dim];
-        for id in 0..n {
-            self.dequantize_into(id as u32, &mut deq[id * dim..(id + 1) * dim]);
+        if self.has_raw_vectors() {
+            let data = &self.raw_vectors[..n * dim];
+            let codebook = PqCodebook::train(data, dim, m, config::PQ_NUM_CENTROIDS);
+            self.pq_codes = codebook.encode_batch(data, dim);
+            self.pq_codebook = Some(codebook);
+        } else {
+            let mut deq = vec![0.0f32; n * dim];
+            for id in 0..n {
+                self.dequantize_into(id as u32, &mut deq[id * dim..(id + 1) * dim]);
+            }
+            let codebook = PqCodebook::train(&deq, dim, m, config::PQ_NUM_CENTROIDS);
+            self.pq_codes = codebook.encode_batch(&deq, dim);
+            self.pq_codebook = Some(codebook);
         }
-        let codebook = PqCodebook::train(&deq, dim, m, config::PQ_NUM_CENTROIDS);
-        self.pq_codes = codebook.encode_batch(&deq, dim);
-        self.pq_codebook = Some(codebook);
     }
 }

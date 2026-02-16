@@ -2,7 +2,8 @@
 //!
 //! Inserts a vector into the HNSW graph with bidirectional connections and
 //! heuristic neighbor pruning (Algorithm 4 from the HNSW paper).
-//! Uses asymmetric f32-vs-u8 distance during construction (no raw_vectors stored).
+//! Uses exact f32-vs-f32 distance when raw vectors are stored,
+//! or asymmetric f32-vs-u8 distance in compact mode.
 
 use crate::hnsw::graph::HnswIndex;
 use crate::hnsw::search::search_layer;
@@ -11,8 +12,7 @@ use crate::quantization::QuantizedVector;
 
 impl HnswIndex {
     /// Insert a new vector into the HNSW index (SoA layout).
-    /// Uses asymmetric f32-vs-u8 distance for graph construction.
-    /// Only the quantized vector is stored (no raw f32 vector).
+    /// Uses exact f32 distance when store_raw_vectors=true, asymmetric f32-vs-u8 otherwise.
     /// internal_id must equal node_count before this call.
     pub fn insert(&mut self, internal_id: u32, raw_vector: &[f32], vector: QuantizedVector) {
         let level = self.random_level();
@@ -20,6 +20,9 @@ impl HnswIndex {
         // First node — push SoA fields and return
         if self.entry_point.is_none() {
             self.push_vector(&vector);
+            if self.config.store_raw_vectors {
+                self.push_raw_vector(raw_vector);
+            }
             if let Some(ref cb) = self.pq_codebook {
                 let codes = cb.encode(raw_vector);
                 self.pq_codes.extend_from_slice(&codes);
@@ -110,6 +113,9 @@ impl HnswIndex {
 
         // Push the new node's SoA fields
         self.push_vector(&vector);
+        if self.config.store_raw_vectors {
+            self.push_raw_vector(raw_vector);
+        }
         if let Some(ref cb) = self.pq_codebook {
             let codes = cb.encode(raw_vector);
             self.pq_codes.extend_from_slice(&codes);
@@ -120,9 +126,9 @@ impl HnswIndex {
         self.node_count += 1;
 
         // Phase 3: Add bidirectional connections and prune over-capacity neighbors
-        // Dequantizes base node to f32, then uses asymmetric f32-vs-u8 for pruning
         let metric = self.config.distance_metric;
         let dim = self.dimension;
+        let use_exact = self.has_raw_vectors();
         let mut base_buf = vec![0.0f32; dim];
         for layer in 0..=top {
             let m_max = if layer == 0 {
@@ -141,18 +147,31 @@ impl HnswIndex {
                 }
                 self.neighbors[nid][layer].push(internal_id);
 
-                // Prune if over capacity — dequantize base, asymmetric f32-vs-u8
+                // Prune if over capacity
                 if self.neighbors[nid][layer].len() > m_max {
-                    self.dequantize_into(neighbor_id, &mut base_buf);
                     let neighbor_ids: Vec<u32> = self.neighbors[nid][layer].clone();
-                    let candidates: Vec<(f32, u32)> = neighbor_ids
-                        .iter()
-                        .map(|&cid| {
-                            let cid_ref = self.get_vector_ref(cid);
-                            let dist = metric.distance_asym(&base_buf, cid_ref);
-                            (dist, cid)
-                        })
-                        .collect();
+                    let candidates: Vec<(f32, u32)> = if use_exact {
+                        neighbor_ids
+                            .iter()
+                            .map(|&cid| {
+                                let dist = metric.distance_exact(
+                                    self.get_raw_vector(neighbor_id),
+                                    self.get_raw_vector(cid),
+                                );
+                                (dist, cid)
+                            })
+                            .collect()
+                    } else {
+                        self.dequantize_into(neighbor_id, &mut base_buf);
+                        neighbor_ids
+                            .iter()
+                            .map(|&cid| {
+                                let cid_ref = self.get_vector_ref(cid);
+                                let dist = metric.distance_asym(&base_buf, cid_ref);
+                                (dist, cid)
+                            })
+                            .collect()
+                    };
                     let pruned = select_neighbors_heuristic(self, &candidates, m_max);
                     self.neighbors[nid][layer] = pruned.iter().map(|&(_, id)| id).collect();
                 }
@@ -171,7 +190,7 @@ impl HnswIndex {
 /// Prefers diverse neighbors: a candidate is selected only if it is closer to the base node
 /// than to any already-selected neighbor. This avoids redundant clusters of near-identical
 /// neighbors and ensures better graph connectivity, especially for cosine distance.
-/// Dequantizes each candidate to f32, then uses asymmetric f32-vs-u8 for pairwise distances.
+/// Uses exact f32-vs-f32 when raw vectors are available, otherwise dequantize + asymmetric.
 fn select_neighbors_heuristic(
     index: &HnswIndex,
     candidates: &[(f32, u32)],
@@ -182,6 +201,7 @@ fn select_neighbors_heuristic(
 
     let mut selected: Vec<(f32, u32)> = Vec::with_capacity(m);
     let metric = index.config.distance_metric;
+    let use_exact = index.has_raw_vectors();
     let mut cid_buf = vec![0.0f32; index.dimension];
 
     for &(dist_to_base, cid) in &sorted {
@@ -189,13 +209,21 @@ fn select_neighbors_heuristic(
             break;
         }
 
-        // Dequantize candidate once, then compare against all selected neighbors
-        index.dequantize_into(cid, &mut cid_buf);
-        let is_diverse = selected.iter().all(|&(_, sid)| {
-            let sid_ref = index.get_vector_ref(sid);
-            let dist_to_selected = metric.distance_asym(&cid_buf, sid_ref);
-            dist_to_base <= dist_to_selected
-        });
+        let is_diverse = if use_exact {
+            let cid_raw = index.get_raw_vector(cid);
+            selected.iter().all(|&(_, sid)| {
+                let sid_raw = index.get_raw_vector(sid);
+                let dist_to_selected = metric.distance_exact(cid_raw, sid_raw);
+                dist_to_base <= dist_to_selected
+            })
+        } else {
+            index.dequantize_into(cid, &mut cid_buf);
+            selected.iter().all(|&(_, sid)| {
+                let sid_ref = index.get_vector_ref(sid);
+                let dist_to_selected = metric.distance_asym(&cid_buf, sid_ref);
+                dist_to_base <= dist_to_selected
+            })
+        };
 
         if is_diverse {
             selected.push((dist_to_base, cid));

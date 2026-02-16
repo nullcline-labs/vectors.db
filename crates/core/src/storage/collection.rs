@@ -469,10 +469,11 @@ impl Collection {
         let data = self.data.read();
         let mut total = 0usize;
 
-        // HNSW vectors: vector_data (u8) + min/scale vecs (raw_vectors no longer stored)
+        // HNSW vectors: vector_data (u8) + min/scale vecs + raw f32 vectors (if stored)
         total += data.hnsw_index.vector_data.len();
         total += data.hnsw_index.vector_min.len() * 4;
         total += data.hnsw_index.vector_scale.len() * 4;
+        total += data.hnsw_index.raw_vectors.len() * 4;
 
         // PQ codes + codebook
         total += data.hnsw_index.pq_codes.len();
@@ -527,8 +528,13 @@ impl Collection {
                 .iter()
                 .filter_map(|(uuid, doc)| {
                     let internal_id = data.uuid_to_internal.get(uuid)?;
-                    let mut raw = vec![0.0f32; dim];
-                    data.hnsw_index.dequantize_into(*internal_id, &mut raw);
+                    let raw = if data.hnsw_index.has_raw_vectors() {
+                        data.hnsw_index.get_raw_vector(*internal_id).to_vec()
+                    } else {
+                        let mut buf = vec![0.0f32; dim];
+                        data.hnsw_index.dequantize_into(*internal_id, &mut buf);
+                        buf
+                    };
                     Some((*uuid, Arc::clone(doc), raw))
                 })
                 .collect();
@@ -571,8 +577,13 @@ impl Collection {
                     }
                     // New documents have an internal_id assigned after Phase A snapshot
                     let internal_id = data.uuid_to_internal.get(uuid)?;
-                    let mut raw = vec![0.0f32; dimension];
-                    data.hnsw_index.dequantize_into(*internal_id, &mut raw);
+                    let raw = if data.hnsw_index.has_raw_vectors() {
+                        data.hnsw_index.get_raw_vector(*internal_id).to_vec()
+                    } else {
+                        let mut buf = vec![0.0f32; dimension];
+                        data.hnsw_index.dequantize_into(*internal_id, &mut buf);
+                        buf
+                    };
                     Some((*uuid, Arc::clone(doc), raw))
                 })
                 .collect();

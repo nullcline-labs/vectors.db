@@ -57,6 +57,7 @@ pub struct CreateCollectionRequest {
     pub ef_construction: Option<usize>,
     pub ef_search: Option<usize>,
     pub distance_metric: Option<String>,
+    pub store_raw_vectors: Option<bool>,
 }
 
 /// Request body for `POST /collections/:name/documents`.

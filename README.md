@@ -13,7 +13,7 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 - **HNSW vector search** with configurable M, ef_construction, ef_search
 - **BM25 keyword search** with Okapi BM25 scoring
 - **Hybrid search** combining vector + keyword via RRF or linear fusion
-- **Scalar quantization** (f32 -> u8) for memory-efficient SIMD-friendly storage
+- **Scalar quantization** (f32 -> u8) for memory-efficient SIMD-friendly storage, with optional raw f32 vectors for maximum recall
 - **Write-Ahead Log (WAL)** with CRC32 checksums and fsync for crash recovery
 - **Bearer token authentication** via `VECTORS_DB_API_KEY`
 - **Prometheus metrics** at `/metrics`
@@ -125,9 +125,12 @@ POST /collections
   "m": 16,
   "ef_construction": 200,
   "ef_search": 50,
-  "distance_metric": "cosine"
+  "distance_metric": "cosine",
+  "store_raw_vectors": false
 }
 ```
+
+`store_raw_vectors` (default `false`): when `true`, stores raw f32 vectors alongside quantized u8 for exact distance reranking (+0.7% recall, +59% RAM).
 
 ### Insert Document
 

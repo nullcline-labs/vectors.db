@@ -166,6 +166,9 @@ pub async fn create_collection(
             _ => DistanceMetric::Cosine,
         };
     }
+    if let Some(store_raw) = req.store_raw_vectors {
+        config_hnsw.store_raw_vectors = store_raw;
+    }
 
     let wal_entry = WalEntry::CreateCollection {
         name: req.name.clone(),
@@ -555,10 +558,14 @@ pub async fn update_document(
             .uuid_to_internal
             .get(&id)
             .ok_or_else(|| ApiError::Internal("Internal error".into()))?;
-        let dim = data.dimension;
-        let mut raw = vec![0.0f32; dim];
-        data.hnsw_index.dequantize_into(*internal_id, &mut raw);
-        raw
+        if data.hnsw_index.has_raw_vectors() {
+            data.hnsw_index.get_raw_vector(*internal_id).to_vec()
+        } else {
+            let dim = data.dimension;
+            let mut raw = vec![0.0f32; dim];
+            data.hnsw_index.dequantize_into(*internal_id, &mut raw);
+            raw
+        }
     };
 
     let new_doc = Document::with_id(id, new_text, new_metadata);

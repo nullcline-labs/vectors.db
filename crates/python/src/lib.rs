@@ -267,7 +267,10 @@ impl VectorDB {
     ///     ef_construction: HNSW ef_construction (default 200).
     ///     ef_search: HNSW ef_search (default 50).
     ///     distance_metric: "cosine", "euclidean", or "dot_product" (default "cosine").
-    #[pyo3(signature = (name, dimension, m=None, ef_construction=None, ef_search=None, distance_metric=None))]
+    ///     store_raw_vectors: If True, stores raw f32 vectors for exact reranking
+    ///         (+0.7% recall, +59% RAM). Default False (compact mode).
+    #[pyo3(signature = (name, dimension, m=None, ef_construction=None, ef_search=None, distance_metric=None, store_raw_vectors=None))]
+    #[allow(clippy::too_many_arguments)]
     fn create_collection(
         &self,
         name: String,
@@ -276,6 +279,7 @@ impl VectorDB {
         ef_construction: Option<usize>,
         ef_search: Option<usize>,
         distance_metric: Option<&str>,
+        store_raw_vectors: Option<bool>,
     ) -> PyResult<()> {
         let metric = match distance_metric {
             Some("cosine") | None => DistanceMetric::Cosine,
@@ -301,6 +305,9 @@ impl VectorDB {
             config.ef_search = ef;
         }
         config.distance_metric = metric;
+        if let Some(store_raw) = store_raw_vectors {
+            config.store_raw_vectors = store_raw;
+        }
 
         self.db
             .create_collection(name, dimension, Some(config))

@@ -1,9 +1,11 @@
 //! Hierarchical Navigable Small World (HNSW) approximate nearest neighbor index.
 //!
 //! This module implements the HNSW algorithm for fast approximate nearest neighbor search.
-//! Vectors are stored using scalar quantization (f32 → u8) for 4× memory reduction,
-//! with asymmetric distance computation (f32 query vs u8 stored) during search.
-//! No raw f32 vectors are stored — all distances use quantized representations.
+//! Vectors are always stored using scalar quantization (f32 → u8) for 4× memory reduction.
+//! When `store_raw_vectors` is false (default, compact mode), all distances use
+//! asymmetric f32-query-vs-u8-stored computation. When true, raw f32 vectors are
+//! also stored for exact distance computation during search and reranking (+0.7% recall,
+//! +59% RAM).
 //!
 //! The graph uses a Struct-of-Arrays (SoA) layout for cache-friendly access:
 //! all vector bytes are stored contiguously in an arena, with separate arrays for

@@ -43,8 +43,10 @@ pub fn load_collection(path: &Path) -> io::Result<Collection> {
     let mut data: CollectionData = bincode::deserialize(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    // Free legacy raw_vectors from old snapshots (no longer used)
-    data.hnsw_index.free_raw_vectors();
+    // Free legacy raw_vectors from old snapshots when compact mode is active
+    if !data.hnsw_index.config.store_raw_vectors {
+        data.hnsw_index.free_raw_vectors();
+    }
 
     data.validate().map_err(|e| {
         io::Error::new(

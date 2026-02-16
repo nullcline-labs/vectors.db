@@ -51,6 +51,7 @@ impl PartialOrd for ResultEntry {
 
 /// Compute distance from query to a node in the index.
 /// When PQ table is available, uses M table lookups (fastest approximate).
+/// When raw f32 vectors are stored, uses exact f32-vs-f32 distance.
 /// Otherwise, uses f32-vs-u8 asymmetric distance (SIMD-optimized).
 #[inline]
 fn compute_distance(
@@ -63,6 +64,9 @@ fn compute_distance(
     if let Some(table) = pq_table {
         let codes = index.get_pq_codes(node_id);
         table.distance(codes)
+    } else if index.has_raw_vectors() {
+        let raw = index.get_raw_vector(node_id);
+        index.config.distance_metric.distance_exact(query, raw)
     } else {
         let vref = index.get_vector_ref(node_id);
         index
@@ -136,6 +140,8 @@ pub fn search_layer<F: Fn(u32) -> bool>(
                 let next_id = neighbor_list[i + 1];
                 if pq_table.is_some() {
                     index.prefetch_pq_codes(next_id);
+                } else if index.has_raw_vectors() {
+                    index.prefetch_raw_vector(next_id);
                 } else {
                     index.prefetch_vector(next_id);
                 }
@@ -244,17 +250,27 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         pq_table_ref,
     );
 
-    // Rerank candidates using asymmetric f32-vs-u8 distance (refines PQ ordering)
-    for i in 0..results.len() {
-        if i + 1 < results.len() {
-            index.prefetch_vector(results[i + 1].1);
+    // Rerank candidates using exact f32 distance (when available) or asymmetric f32-vs-u8
+    if index.has_raw_vectors() {
+        for i in 0..results.len() {
+            if i + 1 < results.len() {
+                index.prefetch_raw_vector(results[i + 1].1);
+            }
+            let raw = index.get_raw_vector(results[i].1);
+            results[i].0 = index.config.distance_metric.distance_exact(query, raw);
         }
-        let vref = index.get_vector_ref(results[i].1);
-        results[i].0 =
-            index
-                .config
-                .distance_metric
-                .distance_asym_prenorm(query, vref, query_norm_sq);
+    } else {
+        for i in 0..results.len() {
+            if i + 1 < results.len() {
+                index.prefetch_vector(results[i + 1].1);
+            }
+            let vref = index.get_vector_ref(results[i].1);
+            results[i].0 =
+                index
+                    .config
+                    .distance_metric
+                    .distance_asym_prenorm(query, vref, query_norm_sq);
+        }
     }
     results.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
