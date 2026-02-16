@@ -9,6 +9,13 @@ use crate::hnsw::graph::HnswIndex;
 use crate::hnsw::search::search_layer;
 use crate::hnsw::visited::VisitedSet;
 use crate::quantization::QuantizedVector;
+use std::cell::RefCell;
+
+thread_local! {
+    /// Thread-local VisitedSet for insert operations.
+    /// Eliminates per-insert allocation (~2MB for 1M-node index).
+    static INSERT_VISITED: RefCell<VisitedSet> = RefCell::new(VisitedSet::new(0));
+}
 
 impl HnswIndex {
     /// Insert a new vector into the HNSW index (SoA layout).
@@ -43,73 +50,78 @@ impl HnswIndex {
         let entry_point = self
             .entry_point
             .expect("entry_point is Some after is_none() guard");
-        let mut current_ep = entry_point;
 
         // Precompute query norm squared for this raw_vector
         let query_norm_sq: f32 = raw_vector.iter().map(|&x| x * x).sum();
-
-        // Allocate VisitedSet once, reuse across all search_layer calls
-        let mut visited = VisitedSet::new(self.node_count as usize);
-
-        // Phase 1: Greedily traverse from top layer down to node's level + 1
-        // Uses asymmetric f32-vs-u8 distance (query is the new node's raw f32 vector)
-        let no_filter = |_: u32| true;
-        for layer in (level + 1..=self.max_layer).rev() {
-            let results = search_layer(
-                self,
-                raw_vector,
-                std::slice::from_ref(&current_ep),
-                1,
-                layer,
-                &mut visited,
-                query_norm_sq,
-                &no_filter,
-                None,
-            );
-            if let Some(&(_, nearest)) = results.first() {
-                current_ep = nearest;
-            }
-        }
-
-        // Phase 2: Search each layer and collect neighbors for the new node.
-        // We collect all neighbor lists first, then push the node.
         let top = level.min(self.max_layer);
-        let mut node_neighbors: Vec<Vec<u32>> = Vec::with_capacity(level + 1);
-        for _ in 0..=level {
-            node_neighbors.push(Vec::new());
-        }
 
-        let mut layer_eps: Vec<u32> = vec![current_ep];
-        for layer in (0..=top).rev() {
-            let ef = self.config.ef_construction;
-            let candidates = search_layer(
-                self,
-                raw_vector,
-                &layer_eps,
-                ef,
-                layer,
-                &mut visited,
-                query_norm_sq,
-                &no_filter,
-                None,
-            );
+        // Phases 1 & 2: search_layer borrows &self, so visited must be external.
+        // Use thread-local VisitedSet to avoid per-insert allocation.
+        let node_neighbors = INSERT_VISITED.with(|cell| {
+            let mut visited = cell.borrow_mut();
+            visited.ensure_capacity(self.node_count as usize);
 
-            let m_max = if layer == 0 {
-                self.config.m_max0
-            } else {
-                self.config.m
-            };
+            let mut current_ep = entry_point;
 
-            let selected = select_neighbors_heuristic(self, &candidates, m_max);
-            node_neighbors[layer] = selected.iter().map(|&(_, id)| id).collect();
-
-            // Update entry points for next (lower) layer
-            layer_eps.clear();
-            layer_eps.extend(candidates.iter().map(|&(_, id)| id));
-            if layer_eps.is_empty() {
-                layer_eps.push(entry_point);
+            // Phase 1: Greedily traverse from top layer down to node's level + 1
+            let no_filter = |_: u32| true;
+            for layer in (level + 1..=self.max_layer).rev() {
+                let results = search_layer(
+                    self,
+                    raw_vector,
+                    std::slice::from_ref(&current_ep),
+                    1,
+                    layer,
+                    &mut *visited,
+                    query_norm_sq,
+                    &no_filter,
+                    None,
+                );
+                if let Some(&(_, nearest)) = results.first() {
+                    current_ep = nearest;
+                }
             }
-        }
+
+            // Phase 2: Search each layer and collect neighbors for the new node.
+            let mut node_neighbors: Vec<Vec<u32>> = Vec::with_capacity(level + 1);
+            for _ in 0..=level {
+                node_neighbors.push(Vec::new());
+            }
+
+            let mut layer_eps: Vec<u32> = vec![current_ep];
+            for layer in (0..=top).rev() {
+                let ef = self.config.ef_construction;
+                let candidates = search_layer(
+                    self,
+                    raw_vector,
+                    &layer_eps,
+                    ef,
+                    layer,
+                    &mut *visited,
+                    query_norm_sq,
+                    &no_filter,
+                    None,
+                );
+
+                let m_max = if layer == 0 {
+                    self.config.m_max0
+                } else {
+                    self.config.m
+                };
+
+                let selected = select_neighbors_heuristic(self, &candidates, m_max);
+                node_neighbors[layer] = selected.iter().map(|&(_, id)| id).collect();
+
+                // Update entry points for next (lower) layer
+                layer_eps.clear();
+                layer_eps.extend(candidates.iter().map(|&(_, id)| id));
+                if layer_eps.is_empty() {
+                    layer_eps.push(entry_point);
+                }
+            }
+
+            node_neighbors
+        });
 
         // Push the new node's SoA fields
         self.push_vector(&vector);

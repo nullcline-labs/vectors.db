@@ -209,27 +209,27 @@ Results on Apple Silicon (M-series), single-threaded, SIFT-128 (1M vectors, 128d
 
 | ef_search | Recall@10 | QPS | Memory |
 |-----------|-----------|-----|--------|
-| 10 | 0.7675 | 6,177 | 122 MB |
-| 40 | 0.9454 | 4,788 | |
-| 120 | 0.9852 | 2,819 | |
-| 200 | 0.9897 | 1,750 | |
-| 400 | 0.9916 | 868 | |
+| 10 | 0.7695 | 22,566 | 122 MB |
+| 40 | 0.9450 | 9,152 | |
+| 120 | 0.9853 | 3,661 | |
+| 200 | 0.9898 | 2,325 | |
+| 400 | 0.9916 | 1,275 | |
 
-Build: 1,689 inserts/s
+Build: 1,852 inserts/s
 
 #### Exact mode (`store_raw_vectors=true`)
 
 | ef_search | Recall@10 | QPS | Memory |
 |-----------|-----------|-----|--------|
-| 10 | 0.7712 | 5,745 | 610 MB |
-| 40 | 0.9498 | 3,144 | |
-| 120 | 0.9923 | 2,573 | |
-| 200 | 0.9972 | 1,644 | |
-| 400 | 0.9989 | 975 | |
+| 10 | 0.7716 | 22,940 | 610 MB |
+| 40 | 0.9494 | 8,759 | |
+| 120 | 0.9924 | 3,674 | |
+| 200 | 0.9972 | 2,370 | |
+| 400 | 0.9990 | 1,277 | |
 
-Build: 1,848 inserts/s
+Build: 1,912 inserts/s
 
-Compact mode uses **5x less memory** with only ~0.7% recall loss. Exact mode matches hnsw(nmslib) at 0.9991 recall.
+Compact mode uses **5x less memory** with only ~0.7% recall loss. Exact mode matches hnsw(nmslib) at 0.9990 recall.
 
 #### High-dimensional (768d, 1536d)
 
@@ -237,8 +237,8 @@ Synthetic data at LLM embedding dimensions. Compact vs exact at ef_search=400:
 
 | Dimension | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
 |-----------|---------------|--------------|-------------|-----------|
-| 768d (100K) | 0.9860 | 0.9994 | 1,257 | 1,031 |
-| 1536d (25K) | 0.9880 | 1.0000 | 1,322 | 1,087 |
+| 768d (100K) | 0.9860 | 0.9994 | 1,295 | 1,081 |
+| 1536d (25K) | 0.9880 | 1.0000 | 1,484 | 1,307 |
 
 At high dimensions, exact mode is recommended for maximum recall (+1.3% at 768d). Build speed is comparable between modes thanks to cached dequantization during construction.
 
@@ -246,9 +246,9 @@ At high dimensions, exact mode is recommended for maximum recall (+1.3% at 768d)
 
 | Benchmark | Result |
 |-----------|--------|
-| Filtered 50% selectivity | 0.9911 recall, 1,005 QPS |
-| Filtered 1% selectivity | 0.9953 recall, 43 QPS |
-| 8-thread concurrent | 6,168 QPS (3.84x speedup) |
+| Filtered 50% selectivity | 0.9913 recall, 1,282 QPS |
+| Filtered 1% selectivity | 0.9953 recall, 46 QPS |
+| 8-thread concurrent | 10,878 QPS (5.0x scaling) |
 
 Run benchmarks:
 

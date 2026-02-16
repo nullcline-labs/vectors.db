@@ -8,7 +8,14 @@ use crate::hnsw::graph::HnswIndex;
 use crate::hnsw::visited::VisitedSet;
 use crate::quantization::pq::PqDistanceTable;
 use ordered_float::OrderedFloat;
+use std::cell::RefCell;
 use std::collections::BinaryHeap;
+
+thread_local! {
+    /// Thread-local VisitedSet pool for search operations.
+    /// Eliminates per-query 2MB allocations by reusing across searches on the same thread.
+    static SEARCH_VISITED: RefCell<VisitedSet> = RefCell::new(VisitedSet::new(0));
+}
 
 /// A candidate during search: (negative distance, internal_id).
 /// BinaryHeap is a max-heap; we use negative distance for min-heap behavior.
@@ -203,94 +210,96 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         None => return Vec::new(),
     };
 
-    // Precompute query norm squared (constant for this query)
-    let query_norm_sq: f32 = query.iter().map(|&x| x * x).sum();
+    SEARCH_VISITED.with(|cell| {
+        let mut visited = cell.borrow_mut();
+        visited.ensure_capacity(index.node_count as usize);
 
-    // Build PQ distance table if codebook is available
-    let pq_table = index
-        .pq_codebook
-        .as_ref()
-        .map(|cb| cb.build_distance_table(query, index.config.distance_metric));
-    let pq_table_ref = pq_table.as_ref();
+        // Precompute query norm squared (constant for this query)
+        let query_norm_sq: f32 = query.iter().map(|&x| x * x).sum();
 
-    // Allocate VisitedSet once, reuse across all layers
-    let mut visited = VisitedSet::new(index.node_count as usize);
+        // Build PQ distance table if codebook is available
+        let pq_table = index
+            .pq_codebook
+            .as_ref()
+            .map(|cb| cb.build_distance_table(query, index.config.distance_metric));
+        let pq_table_ref = pq_table.as_ref();
 
-    let mut current_ep = entry_point;
+        let mut current_ep = entry_point;
 
-    // Traverse from top layer down to layer 1, using ef=1 (quantized, fast)
-    // Upper layers use no-op filter — filtering only matters at layer 0
-    let no_filter = |_: u32| true;
-    for layer in (1..=index.max_layer).rev() {
-        let results = search_layer(
-            index,
-            query,
-            std::slice::from_ref(&current_ep),
-            1,
-            layer,
-            &mut visited,
-            query_norm_sq,
-            &no_filter,
-            pq_table_ref,
-        );
-        if let Some(&(_, nearest)) = results.first() {
-            current_ep = nearest;
-        }
-    }
-
-    // Search layer 0 with ef_search — apply filter here.
-    // Adaptive oversampling: if results < k, retry with larger ef (up to 4x).
-    let base_ef = index.config.ef_search.max(k);
-    let max_ef = (base_ef * 4).min(index.node_count as usize);
-    let mut ef = base_ef;
-    let mut results;
-
-    loop {
-        visited = VisitedSet::new(index.node_count as usize);
-        results = search_layer(
-            index,
-            query,
-            std::slice::from_ref(&current_ep),
-            ef,
-            0,
-            &mut visited,
-            query_norm_sq,
-            filter_fn,
-            pq_table_ref,
-        );
-
-        if results.len() >= k || ef >= max_ef {
-            break;
-        }
-
-        // Double ef for next attempt
-        ef = (ef * 2).min(max_ef);
-    }
-
-    // Rerank candidates using exact f32 distance (when available) or asymmetric f32-vs-u8
-    if index.has_raw_vectors() {
-        for i in 0..results.len() {
-            if i + 1 < results.len() {
-                index.prefetch_raw_vector(results[i + 1].1);
+        // Traverse from top layer down to layer 1, using ef=1 (quantized, fast)
+        // Upper layers use no-op filter — filtering only matters at layer 0
+        let no_filter = |_: u32| true;
+        for layer in (1..=index.max_layer).rev() {
+            let results = search_layer(
+                index,
+                query,
+                std::slice::from_ref(&current_ep),
+                1,
+                layer,
+                &mut *visited,
+                query_norm_sq,
+                &no_filter,
+                pq_table_ref,
+            );
+            if let Some(&(_, nearest)) = results.first() {
+                current_ep = nearest;
             }
-            let raw = index.get_raw_vector(results[i].1);
-            results[i].0 = index.config.distance_metric.distance_exact(query, raw);
         }
-    } else {
-        for i in 0..results.len() {
-            if i + 1 < results.len() {
-                index.prefetch_vector(results[i + 1].1);
+
+        // Search layer 0 with ef_search — apply filter here.
+        // Adaptive oversampling: if results < k, retry with larger ef (up to 4x).
+        let base_ef = index.config.ef_search.max(k);
+        let max_ef = (base_ef * 4).min(index.node_count as usize);
+        let mut ef = base_ef;
+        let mut results;
+
+        loop {
+            // search_layer calls visited.clear() at its start — no reallocation needed
+            results = search_layer(
+                index,
+                query,
+                std::slice::from_ref(&current_ep),
+                ef,
+                0,
+                &mut *visited,
+                query_norm_sq,
+                filter_fn,
+                pq_table_ref,
+            );
+
+            if results.len() >= k || ef >= max_ef {
+                break;
             }
-            let vref = index.get_vector_ref(results[i].1);
-            results[i].0 =
-                index
+
+            // Double ef for next attempt
+            ef = (ef * 2).min(max_ef);
+        }
+
+        // Rerank candidates using exact f32 distance (when available) or asymmetric f32-vs-u8
+        if index.has_raw_vectors() {
+            for i in 0..results.len() {
+                if i + 1 < results.len() {
+                    index.prefetch_raw_vector(results[i + 1].1);
+                }
+                let raw = index.get_raw_vector(results[i].1);
+                results[i].0 = index.config.distance_metric.distance_exact(query, raw);
+            }
+        } else {
+            for i in 0..results.len() {
+                if i + 1 < results.len() {
+                    index.prefetch_vector(results[i + 1].1);
+                }
+                let vref = index.get_vector_ref(results[i].1);
+                results[i].0 = index
                     .config
                     .distance_metric
                     .distance_asym_prenorm(query, vref, query_norm_sq);
+            }
         }
-    }
-    results.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        results
+            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    results.truncate(k);
-    results
+        results.truncate(k);
+        results
+    })
 }

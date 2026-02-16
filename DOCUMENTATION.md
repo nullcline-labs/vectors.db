@@ -1333,11 +1333,11 @@ Results on Apple Silicon (M-series), single-threaded, compact mode (`store_raw_v
 |---------|---------|------------|--------|--------------------|-------------|--------|
 | GloVe-25 | 1.2M | 25 | Cosine | 0.99+ | ~10,000 | — |
 | GloVe-100 | 1M | 100 | Cosine | 0.99+ | ~5,000 | — |
-| SIFT-128 | 1M | 128 | Euclidean | 0.9916 | 1,750 | 122 MB |
-| Synthetic-768 | 100K | 768 | Cosine | 0.9860 | 1,623 | 73 MB |
-| Synthetic-1536 | 25K | 1536 | Cosine | 0.9880 | 1,667 | 37 MB |
+| SIFT-128 | 1M | 128 | Euclidean | 0.9916 | 2,325 | 122 MB |
+| Synthetic-768 | 100K | 768 | Cosine | 0.9860 | 1,673 | 73 MB |
+| Synthetic-1536 | 25K | 1536 | Cosine | 0.9880 | 1,697 | 37 MB |
 
-With exact mode (`store_raw_vectors=true`): SIFT-128 reaches **0.9991**, 768d reaches **0.9994**, 1536d reaches **1.0000** recall at ef_search=400.
+With exact mode (`store_raw_vectors=true`): SIFT-128 reaches **0.9990**, 768d reaches **0.9994**, 1536d reaches **1.0000** recall at ef_search=400.
 
 #### GloVe-25 (Cosine, 1.18M vectors, 25 dimensions)
 
@@ -1387,38 +1387,38 @@ Recall vs throughput at different ef_search values:
 
 #### SIFT-128 (Euclidean, 1M vectors, 128 dimensions)
 
-**Compact mode** (`store_raw_vectors=false`, default) — 122 MB, build 1,689 ins/s:
+**Compact mode** (`store_raw_vectors=false`, default) — 122 MB, build 1,852 ins/s:
 
 | ef_search | Recall@10 | QPS | Avg Latency |
 |-----------|-----------|-----|-------------|
-| 10 | 0.7675 | 6,177 | 162 us |
-| 20 | 0.8765 | 5,620 | 178 us |
-| 40 | 0.9454 | 4,788 | 209 us |
-| 80 | 0.9775 | 3,585 | 279 us |
-| 120 | 0.9852 | 2,819 | 355 us |
-| 200 | 0.9897 | 1,750 | 571 us |
-| 400 | 0.9916 | 868 | 1,152 us |
+| 10 | 0.7695 | 22,566 | 44 us |
+| 20 | 0.8758 | 14,848 | 67 us |
+| 40 | 0.9450 | 9,152 | 109 us |
+| 80 | 0.9775 | 5,108 | 196 us |
+| 120 | 0.9853 | 3,661 | 273 us |
+| 200 | 0.9898 | 2,325 | 430 us |
+| 400 | 0.9916 | 1,275 | 785 us |
 
-**Exact mode** (`store_raw_vectors=true`) — 610 MB, build 1,848 ins/s:
+**Exact mode** (`store_raw_vectors=true`) — 610 MB, build 1,912 ins/s:
 
 | ef_search | Recall@10 | QPS | Avg Latency |
 |-----------|-----------|-----|-------------|
-| 10 | 0.7712 | 5,745 | 174 us |
-| 20 | 0.8781 | 5,539 | 181 us |
-| 40 | 0.9498 | 3,144 | 318 us |
-| 80 | 0.9840 | 3,050 | 328 us |
-| 120 | 0.9923 | 2,573 | 389 us |
-| 200 | 0.9972 | 1,644 | 608 us |
-| 400 | 0.9989 | 975 | 1,026 us |
+| 10 | 0.7716 | 22,940 | 44 us |
+| 20 | 0.8786 | 15,131 | 66 us |
+| 40 | 0.9494 | 8,759 | 114 us |
+| 80 | 0.9838 | 4,972 | 201 us |
+| 120 | 0.9924 | 3,674 | 272 us |
+| 200 | 0.9972 | 2,370 | 422 us |
+| 400 | 0.9990 | 1,277 | 783 us |
 
 **Mode comparison (SIFT-128 at ef_search=200):**
 
 | | Compact | Exact | Delta |
 |---|---------|-------|-------|
-| Recall@10 | 0.9897 | 0.9972 | +0.75% |
-| QPS | 1,750 | 1,644 | -6% |
+| Recall@10 | 0.9898 | 0.9972 | +0.74% |
+| QPS | 2,325 | 2,370 | -2% |
 | Memory | 122 MB | 610 MB | +400% |
-| Build speed | 1,689 ins/s | 1,848 ins/s | -9% |
+| Build speed | 1,852 ins/s | 1,912 ins/s | -3% |
 
 **Comparison with other systems (ann-benchmarks.com, SIFT-128, k=10):**
 
@@ -1428,14 +1428,14 @@ Recall vs throughput at different ef_search values:
 | Vamana (DiskANN) | 0.9999 | 5,765 | Microsoft |
 | hnsw (nmslib) | 0.9989 | 4,288 | C++ HNSW |
 | glass | 0.9999 | 4,007 | Graph-based |
-| **vectors.db (exact)** | **0.9991** | **975** | **u8+f32, Rust, 610 MB** |
-| **vectors.db (compact)** | **0.9916** | **868** | **u8 only, Rust, 122 MB** |
+| **vectors.db (exact)** | **0.9990** | **1,277** | **u8+f32, Rust, 610 MB** |
+| **vectors.db (compact)** | **0.9916** | **1,275** | **u8 only, Rust, 122 MB** |
 | hnswlib | 0.9941 | 1,244 | C++ |
 | hnsw (faiss) | 0.9992 | 652 | Facebook |
 | Annoy (Spotify) | 0.9900 | 502 | Tree-based |
 | pgvector | 0.9890 | 16 | PostgreSQL |
 
-> **Note**: vectors.db exact mode matches hnsw(nmslib) recall (0.9991) while using scalar quantization. Compact mode trades ~0.7% recall for 5x less memory (122 MB vs 610 MB). Both modes measured at ef_search=400. Most reference implementations use full f32 vectors.
+> **Note**: vectors.db exact mode matches hnsw(nmslib) recall (0.9990) while using scalar quantization. Compact mode trades ~0.7% recall for 5x less memory (122 MB vs 610 MB). Both modes measured at ef_search=400. Most reference implementations use full f32 vectors.
 
 ### BM25 Full-Text Search Benchmark
 
@@ -1474,25 +1474,25 @@ Synthetic clustered Gaussian data with brute-force ground truth. Tests vectors.d
 
 | ef_search | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
 |-----------|---------------|--------------|-------------|-----------|
-| 40 | 0.7564 | 0.7602 | 3,607 | 2,942 |
-| 80 | 0.8999 | 0.9065 | 2,405 | 2,023 |
-| 120 | 0.9476 | 0.9565 | 2,010 | 1,688 |
-| 200 | 0.9757 | 0.9868 | 1,623 | 1,347 |
-| 400 | 0.9860 | 0.9994 | 1,257 | 1,031 |
+| 40 | 0.7517 | 0.7559 | 3,791 | 3,042 |
+| 80 | 0.8992 | 0.9060 | 2,313 | 2,071 |
+| 120 | 0.9469 | 0.9580 | 2,036 | 1,663 |
+| 200 | 0.9755 | 0.9879 | 1,673 | 1,367 |
+| 400 | 0.9860 | 0.9994 | 1,295 | 1,081 |
 
-Memory: Compact 73 MB, Exact 366 MB (5x). Build: Compact 348 ins/s, Exact 478 ins/s.
+Memory: Compact 73 MB, Exact 366 MB (5x). Build: Compact 353 ins/s, Exact 483 ins/s.
 
 #### 1536d (25K vectors, Cosine) — OpenAI text-embedding-3-large dimensions
 
 | ef_search | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
 |-----------|---------------|--------------|-------------|-----------|
-| 40 | 0.8904 | 0.8934 | 2,956 | 2,438 |
-| 80 | 0.9646 | 0.9724 | 2,223 | 1,820 |
-| 120 | 0.9802 | 0.9910 | 1,915 | 1,641 |
-| 200 | 0.9868 | 0.9986 | 1,667 | 1,406 |
-| 400 | 0.9880 | 1.0000 | 1,322 | 1,087 |
+| 40 | 0.8914 | 0.8916 | 3,524 | 2,687 |
+| 80 | 0.9640 | 0.9730 | 2,527 | 2,103 |
+| 120 | 0.9804 | 0.9908 | 2,237 | 1,827 |
+| 200 | 0.9868 | 0.9984 | 1,697 | 1,219 |
+| 400 | 0.9880 | 1.0000 | 1,484 | 1,307 |
 
-Memory: Compact 37 MB, Exact 183 MB (5x). Build: Compact 195 ins/s, Exact 286 ins/s.
+Memory: Compact 37 MB, Exact 183 MB (5x). Build: Compact 199 ins/s, Exact 308 ins/s.
 
 > **Key finding**: At high dimensions, exact mode provides significantly better recall than compact mode (+1.3% at 768d, +1.2% at 1536d, ef_search=400). Build speed is now comparable between modes thanks to cached dequantization in the heuristic neighbor selection — compact mode dequantizes each candidate once and caches selected neighbor vectors for fast f32-vs-f32 SIMD distance, eliminating the previous 6x build speed gap. For high-dimensional LLM embeddings, `store_raw_vectors=true` is recommended if RAM permits for the recall improvement.
 
@@ -1502,10 +1502,10 @@ Tests HNSW recall and throughput under metadata filters at various selectivities
 
 | Filter | Selectivity | Recall@10 | QPS | Avg Latency |
 |--------|------------|-----------|-----|-------------|
-| No filter (baseline) | 100% | 0.9916 | 1,222 | 818 us |
-| category < 5 | ~50% | 0.9911 | 1,005 | 995 us |
-| category == 0 | ~10% | 0.9928 | 300 | 3.3 ms |
-| region == 0 | ~1% | 0.9953 | 43 | 23.4 ms |
+| No filter (baseline) | 100% | 0.9910 | 2,093 | 478 us |
+| category < 5 | ~50% | 0.9913 | 1,282 | 780 us |
+| category == 0 | ~10% | 0.9928 | 335 | 2.98 ms |
+| region == 0 | ~1% | 0.9953 | 46 | 21.6 ms |
 
 > **Key finding**: Recall remains excellent (>0.99) at all selectivities, even at 1%. QPS degrades at low selectivity because HNSW must traverse more of the graph to find enough matching candidates. Adaptive ef oversampling (up to 4x base ef) ensures recall is maintained even at very low selectivity — if the initial search returns fewer than k results, the search retries with doubled ef automatically.
 
@@ -1517,20 +1517,20 @@ Tests how search throughput scales with multiple threads. Uses SIFT-128 (1M vect
 
 | ef_search | QPS | Avg Latency | p50 | p95 | p99 |
 |-----------|-----|-------------|-----|-----|-----|
-| 50 | 2,502 | 399 us | 328 us | 749 us | 1,322 us |
-| 100 | 1,614 | 619 us | 483 us | 1,365 us | 2,212 us |
-| 200 | 1,501 | 666 us | 658 us | 866 us | 1,145 us |
+| 50 | 7,086 | 141 us | 143 us | 172 us | 191 us |
+| 100 | 3,963 | 252 us | 258 us | 306 us | 354 us |
+| 200 | 2,175 | 459 us | 473 us | 561 us | 596 us |
 
 #### Multi-thread scaling (ef_search=200)
 
 | Threads | Agg QPS | Speedup | Avg Latency | p50 | p95 | p99 |
 |---------|---------|---------|-------------|-----|-----|-----|
-| 1 | 1,607 | 1.00x | 621 us | 620 us | 803 us | 937 us |
-| 2 | 2,885 | 1.80x | 692 us | 658 us | 1.0 ms | 1.9 ms |
-| 4 | 4,826 | 3.00x | 814 us | 706 us | 1.4 ms | 1.9 ms |
-| 8 | 6,168 | 3.84x | 1,257 us | 783 us | 3.3 ms | 9.4 ms |
+| 1 | 2,171 | 1.00x | 460 us | 474 us | 560 us | 600 us |
+| 2 | 4,222 | 1.94x | 472 us | 485 us | 574 us | 617 us |
+| 4 | 7,819 | 3.60x | 495 us | 472 us | 908 us | 1,046 us |
+| 8 | 10,878 | 5.01x | 720 us | 512 us | 1.3 ms | 4.7 ms |
 
-> **Key finding**: HNSW search scales nearly linearly up to 4 threads (3.0x speedup). At 8 threads, scaling is 3.84x due to L2/L3 cache contention and memory bandwidth saturation. Search is fully lock-free — no mutexes or atomics are needed for read-only concurrent access. Tail latency (p99) increases at higher thread counts due to cache pressure.
+> **Key finding**: Thread-local VisitedSet pooling eliminates per-query 2MB allocations, enabling strong concurrent scaling. At 8 threads, scaling reaches 5.0x with 10,878 aggregate QPS. Search is fully lock-free — no mutexes or atomics are needed for read-only concurrent access. Tail latency (p99) remains well-controlled up to 4 threads, with moderate increase at 8 threads due to cache pressure.
 
 ### Running benchmarks
 

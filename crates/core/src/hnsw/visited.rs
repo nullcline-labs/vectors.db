@@ -6,6 +6,7 @@
 /// Generation-based visited set. Replaces `HashSet<u32>` with O(1) array indexing.
 /// Each `clear()` increments a generation counter; `insert()` compares against current generation.
 /// Uses u16 generation to reduce full memset frequency to every 65534 clears.
+#[derive(Debug)]
 pub struct VisitedSet {
     data: Vec<u16>,
     generation: u16,
@@ -46,6 +47,12 @@ impl VisitedSet {
             self.data[idx] = self.generation;
             true
         }
+    }
+}
+
+impl Default for VisitedSet {
+    fn default() -> Self {
+        Self::new(0)
     }
 }
 
