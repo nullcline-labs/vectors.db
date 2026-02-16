@@ -2743,6 +2743,7 @@ dependencies = [
  "bincode",
  "clap",
  "crc32fast",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "openraft",

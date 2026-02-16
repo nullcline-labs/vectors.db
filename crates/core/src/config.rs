@@ -94,6 +94,9 @@ pub const MAX_METADATA_BYTES: usize = 65_536;
 /// Maximum number of concurrent in-flight requests.
 pub const MAX_CONCURRENT_REQUESTS: usize = 512;
 
+/// Default graceful shutdown timeout in seconds.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
 /// Maximum entries per WAL group commit batch before forcing a flush.
 pub const WAL_GROUP_COMMIT_MAX_BATCH: usize = 128;
 

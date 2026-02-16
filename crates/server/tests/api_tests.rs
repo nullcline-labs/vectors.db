@@ -48,6 +48,7 @@ async fn spawn_app_full(
         key_rate_limiters: std::sync::Arc::new(parking_lot::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        memory_reserved: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = create_router(state);
@@ -1205,6 +1206,7 @@ async fn test_routing_table_with_local_assignment() {
         key_rate_limiters: std::sync::Arc::new(parking_lot::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        memory_reserved: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = vectorsdb_server::api::create_router(state);

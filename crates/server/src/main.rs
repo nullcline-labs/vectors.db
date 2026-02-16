@@ -44,6 +44,14 @@ struct Args {
     #[arg(long)]
     node_id: Option<u64>,
 
+    /// Graceful shutdown timeout in seconds
+    #[arg(long, default_value_t = config::DEFAULT_SHUTDOWN_TIMEOUT_SECS)]
+    shutdown_timeout: u64,
+
+    /// Fail startup if WAL replay encounters errors (strict mode)
+    #[arg(long, default_value_t = false)]
+    wal_strict: bool,
+
     /// Comma-separated peer addresses (id=addr format, e.g. "2=host2:3030,3=host3:3030")
     #[arg(long)]
     peers: Option<String>,
@@ -111,7 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match wal.replay() {
         Ok((entries, stats)) => {
-            if stats.skipped > 0 || stats.crc_errors > 0 || stats.truncated {
+            let has_errors = stats.skipped > 0 || stats.crc_errors > 0 || stats.truncated;
+            if has_errors {
                 tracing::warn!(
                     "WAL replay stats: {} ok, {} skipped, {} CRC errors, truncated={}",
                     stats.success,
@@ -119,6 +128,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stats.crc_errors,
                     stats.truncated
                 );
+                if args.wal_strict {
+                    eprintln!(
+                        "Error: WAL replay encountered errors (strict mode). \
+                         {} CRC errors, {} skipped, truncated={}. \
+                         Fix the WAL or restart without --wal-strict.",
+                        stats.crc_errors, stats.skipped, stats.truncated
+                    );
+                    std::process::exit(1);
+                }
             }
             if !entries.is_empty() {
                 tracing::info!("Replaying {} WAL entries", entries.len());
@@ -129,6 +147,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
+            if args.wal_strict {
+                eprintln!(
+                    "Error: WAL replay failed (strict mode): {}. \
+                     Fix the WAL or restart without --wal-strict.",
+                    e
+                );
+                std::process::exit(1);
+            }
             tracing::warn!("WAL replay failed: {}", e);
         }
     }
@@ -213,6 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peer_addrs: peer_addrs.clone(),
         start_time: Instant::now(),
         key_rate_limiters: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        memory_reserved: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let mut app = create_router(state);
@@ -284,6 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let shutdown_timeout = args.shutdown_timeout;
     match (args.tls_cert, args.tls_key) {
         (Some(cert), Some(key)) => {
             tracing::info!("TLS enabled");
@@ -293,7 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let shutdown_handle = handle.clone();
             tokio::spawn(async move {
                 wait_for_signal().await;
-                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
+                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(shutdown_timeout)));
             });
             axum_server::bind_rustls(addr.parse()?, tls_config)
                 .handle(handle)
@@ -312,7 +340,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    flush_and_shutdown(&db, &wal, &args.data_dir);
+    flush_and_shutdown(&db, &wal, &args.data_dir, shutdown_timeout);
 
     Ok(())
 }
@@ -486,14 +514,24 @@ async fn wait_for_signal() {
     tracing::info!("Shutting down gracefully, draining in-flight requests...");
 }
 
-fn flush_and_shutdown(db: &Database, wal: &WriteAheadLog, data_dir: &str) {
+fn flush_and_shutdown(db: &Database, wal: &WriteAheadLog, data_dir: &str, timeout_secs: u64) {
     tracing::info!("All requests drained, flushing data...");
 
     let _gate = wal.freeze();
 
+    let start = Instant::now();
+    let deadline = Duration::from_secs(timeout_secs);
     let collections = db.collections.read();
     let mut all_saved = true;
     for (name, collection) in collections.iter() {
+        if start.elapsed() > deadline {
+            tracing::error!(
+                "Shutdown flush timeout ({}s) exceeded — aborting remaining saves",
+                timeout_secs
+            );
+            all_saved = false;
+            break;
+        }
         match save_collection(collection, data_dir) {
             Ok(()) => tracing::info!("Saved collection '{}' on shutdown", name),
             Err(e) => {

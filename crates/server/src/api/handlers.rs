@@ -14,6 +14,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -41,6 +42,9 @@ pub struct AppState {
     pub peer_addrs: Option<HashMap<NodeId, String>>,
     pub start_time: Instant,
     pub key_rate_limiters: Arc<parking_lot::Mutex<HashMap<String, TokenBucket>>>,
+    /// Tracks in-flight memory reservations from concurrent write requests.
+    /// Prevents multiple requests from collectively exceeding the memory limit.
+    pub memory_reserved: Arc<AtomicUsize>,
 }
 
 fn validate_embedding(embedding: &[f32]) -> Result<(), ApiError> {
@@ -95,12 +99,43 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRe
     drop(collections);
 
     let memory_used = state.db.total_memory_bytes();
+    let memory_reserved = state.memory_reserved.load(Ordering::Relaxed);
     let wal_size = std::fs::metadata(&state.wal_path)
         .map(|m| m.len())
         .unwrap_or(0);
     let uptime = state.start_time.elapsed().as_secs();
 
-    let degraded = state.max_memory_bytes > 0 && memory_used >= state.max_memory_bytes * 9 / 10;
+    // Check disk space on data directory
+    let disk_available = disk_available_bytes(&state.data_dir);
+
+    let mut warnings = Vec::new();
+
+    let memory_degraded = state.max_memory_bytes > 0
+        && memory_used + memory_reserved >= state.max_memory_bytes * 9 / 10;
+    if memory_degraded {
+        warnings.push(format!(
+            "Memory usage at {}% of limit",
+            (memory_used + memory_reserved) * 100 / state.max_memory_bytes
+        ));
+    }
+
+    // Warn if disk space is low (< 100 MB)
+    if disk_available < 100 * 1024 * 1024 {
+        warnings.push(format!(
+            "Low disk space: {} MB available",
+            disk_available / (1024 * 1024)
+        ));
+    }
+
+    // Warn if WAL is large (> 1 GB)
+    if wal_size > 1024 * 1024 * 1024 {
+        warnings.push(format!(
+            "Large WAL: {} MB (consider compacting)",
+            wal_size / (1024 * 1024)
+        ));
+    }
+
+    let degraded = memory_degraded || disk_available < 100 * 1024 * 1024;
 
     let status_code = if degraded {
         StatusCode::SERVICE_UNAVAILABLE
@@ -117,10 +152,29 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRe
             collections_count,
             total_documents,
             memory_used_bytes: memory_used,
+            memory_reserved_bytes: memory_reserved,
             memory_limit_bytes: state.max_memory_bytes,
             wal_size_bytes: wal_size,
+            disk_available_bytes: disk_available,
+            warnings,
         }),
     )
+}
+
+/// Get available disk space for the data directory.
+fn disk_available_bytes(data_dir: &str) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let path = CString::new(data_dir).unwrap_or_else(|_| CString::new("/").unwrap());
+        unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(path.as_ptr(), &mut stat) == 0 {
+                return stat.f_bavail as u64 * stat.f_frsize as u64;
+            }
+        }
+    }
+    u64::MAX // Unknown on non-Unix platforms
 }
 
 /// `POST /collections`
@@ -264,7 +318,8 @@ pub async fn insert_document(
     Path(name): Path<String>,
     Json(req): Json<InsertDocumentRequest>,
 ) -> Result<Json<InsertResponse>, ApiError> {
-    check_memory_limit(&state)?;
+    let estimated_bytes = req.embedding.len() * 4 + req.text.len() + 256;
+    let _mem_guard = check_memory_limit_reserve(&state, estimated_bytes)?;
     validate_embedding(&req.embedding)?;
     validate_metadata(&req.metadata)?;
 
@@ -335,7 +390,12 @@ pub async fn batch_insert_documents(
     Path(name): Path<String>,
     Json(req): Json<BatchInsertRequest>,
 ) -> Result<Json<BatchInsertResponse>, ApiError> {
-    check_memory_limit(&state)?;
+    let estimated_bytes: usize = req
+        .documents
+        .iter()
+        .map(|d| d.embedding.len() * 4 + d.text.len() + 256)
+        .sum();
+    let _mem_guard = check_memory_limit_reserve(&state, estimated_bytes)?;
     if req.documents.is_empty() {
         return Err(ApiError::BadRequest("Batch must not be empty".into()));
     }
@@ -666,20 +726,19 @@ pub async fn search(
                 req.min_similarity,
                 filter,
             )
-        } else if has_embedding {
-            collection.vector_search_filtered(
-                req.query_embedding.as_ref().unwrap(),
-                fetch_count,
-                req.min_similarity,
-                filter,
-            )
-        } else {
-            let raw = collection.keyword_search(req.query_text.as_ref().unwrap(), fetch_count);
+        } else if let Some(ref emb) = req.query_embedding {
+            collection.vector_search_filtered(emb, fetch_count, req.min_similarity, filter)
+        } else if let Some(ref text) = req.query_text {
+            let raw = collection.keyword_search(text, fetch_count);
             raw.into_iter()
                 .filter(|sd| {
                     vectorsdb_core::search::filter::matches_filter(&sd.document.metadata, filter)
                 })
                 .collect()
+        } else {
+            return Err(ApiError::BadRequest(
+                "At least one of query_text or query_embedding is required".into(),
+            ));
         }
     } else if has_embedding && has_text {
         collection.hybrid_search(
@@ -690,14 +749,14 @@ pub async fn search(
             &req.fusion_method,
             req.min_similarity,
         )
-    } else if has_embedding {
-        collection.vector_search(
-            req.query_embedding.as_ref().unwrap(),
-            fetch_count,
-            req.min_similarity,
-        )
+    } else if let Some(ref emb) = req.query_embedding {
+        collection.vector_search(emb, fetch_count, req.min_similarity)
+    } else if let Some(ref text) = req.query_text {
+        collection.keyword_search(text, fetch_count)
     } else {
-        collection.keyword_search(req.query_text.as_ref().unwrap(), fetch_count)
+        return Err(ApiError::BadRequest(
+            "At least one of query_text or query_embedding is required".into(),
+        ));
     };
 
     let search_type = match (has_embedding, has_text) {
@@ -849,13 +908,65 @@ async fn raft_write_or_wal(
     }
 }
 
+/// RAII guard that releases a memory reservation when dropped.
+struct MemoryReservation {
+    reserved: Arc<AtomicUsize>,
+    amount: usize,
+}
+
+impl Drop for MemoryReservation {
+    fn drop(&mut self) {
+        self.reserved.fetch_sub(self.amount, Ordering::Relaxed);
+    }
+}
+
+/// Check memory limit and atomically reserve `extra_bytes` for this request.
+/// Returns a guard that releases the reservation on drop (success or error).
+fn check_memory_limit_reserve(
+    state: &AppState,
+    extra_bytes: usize,
+) -> Result<MemoryReservation, ApiError> {
+    if state.max_memory_bytes == 0 {
+        return Ok(MemoryReservation {
+            reserved: state.memory_reserved.clone(),
+            amount: 0,
+        });
+    }
+
+    // Atomically add our reservation
+    let prev_reserved = state
+        .memory_reserved
+        .fetch_add(extra_bytes, Ordering::Relaxed);
+    let used = state.db.total_memory_bytes();
+    let total = used + prev_reserved + extra_bytes;
+
+    if total > state.max_memory_bytes {
+        // Over limit — release reservation and reject
+        state
+            .memory_reserved
+            .fetch_sub(extra_bytes, Ordering::Relaxed);
+        return Err(ApiError::InsufficientStorage(format!(
+            "Memory limit exceeded: {} bytes committed + {} bytes reserved, {} bytes allowed",
+            used,
+            prev_reserved + extra_bytes,
+            state.max_memory_bytes
+        )));
+    }
+
+    Ok(MemoryReservation {
+        reserved: state.memory_reserved.clone(),
+        amount: extra_bytes,
+    })
+}
+
 fn check_memory_limit(state: &AppState) -> Result<(), ApiError> {
     if state.max_memory_bytes > 0 {
         let used = state.db.total_memory_bytes();
-        if used >= state.max_memory_bytes {
+        let reserved = state.memory_reserved.load(Ordering::Relaxed);
+        if used + reserved >= state.max_memory_bytes {
             return Err(ApiError::InsufficientStorage(format!(
-                "Memory limit exceeded: {} bytes used, {} bytes allowed",
-                used, state.max_memory_bytes
+                "Memory limit exceeded: {} bytes used + {} bytes reserved, {} bytes allowed",
+                used, reserved, state.max_memory_bytes
             )));
         }
     }

@@ -297,7 +297,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
                         .distance_asym_prenorm(query, vref, query_norm_sq);
             }
         }
-        results.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
         results.truncate(k);
         results

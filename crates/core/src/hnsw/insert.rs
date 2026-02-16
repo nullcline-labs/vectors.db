@@ -210,7 +210,7 @@ fn select_neighbors_heuristic(
     m: usize,
 ) -> Vec<(f32, u32)> {
     let mut sorted = candidates.to_vec();
-    sorted.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut selected: Vec<(f32, u32)> = Vec::with_capacity(m);
     let metric = index.config.distance_metric;

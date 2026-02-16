@@ -173,8 +173,12 @@ pub struct HealthResponse {
     pub collections_count: usize,
     pub total_documents: usize,
     pub memory_used_bytes: usize,
+    pub memory_reserved_bytes: usize,
     pub memory_limit_bytes: usize,
     pub wal_size_bytes: u64,
+    pub disk_available_bytes: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 // --- Document Update ---
