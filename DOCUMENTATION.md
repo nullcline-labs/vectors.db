@@ -2,30 +2,69 @@
 
 A lightweight, high-performance, in-memory vector database written in Rust. Features HNSW approximate nearest neighbor search, BM25 full-text search, hybrid retrieval with Reciprocal Rank Fusion, scalar quantization for 4x memory reduction, Write-Ahead Log for crash recovery, Role-Based Access Control, Prometheus metrics, TLS support, and optional Raft-based multi-node clustering.
 
+vectors.db can be used in two ways:
+
+- **Python library** — `pip install`-able, in-process, no server needed. Ideal for RAG pipelines, notebooks, and applications.
+- **REST server** — standalone HTTP server with auth, metrics, clustering, and TLS. Ideal for production deployments.
+
 ---
 
 ## Table of Contents
 
 1. [Quick Start](#1-quick-start)
 2. [Installation](#2-installation)
-3. [Configuration](#3-configuration)
-4. [API Reference](#4-api-reference)
-5. [Search](#5-search)
-6. [Authentication & Authorization](#6-authentication--authorization)
-7. [Data Model](#7-data-model)
-8. [Persistence & Durability](#8-persistence--durability)
-9. [Cluster Mode](#9-cluster-mode)
-10. [Observability](#10-observability)
-11. [Security](#11-security)
-12. [Architecture](#12-architecture)
-13. [Performance Benchmarks](#13-performance-benchmarks)
-14. [Limits & Defaults](#14-limits--defaults)
+3. [Python Library](#3-python-library)
+4. [Server Configuration](#4-server-configuration)
+5. [REST API Reference](#5-rest-api-reference)
+6. [Search](#6-search)
+7. [Authentication & Authorization](#7-authentication--authorization)
+8. [Data Model](#8-data-model)
+9. [Persistence & Durability](#9-persistence--durability)
+10. [Cluster Mode](#10-cluster-mode)
+11. [Observability](#11-observability)
+12. [Security](#12-security)
+13. [Architecture](#13-architecture)
+14. [Performance Benchmarks](#14-performance-benchmarks)
+15. [Limits & Defaults](#15-limits--defaults)
 
 ---
 
 ## 1. Quick Start
 
-### Start the server
+### Python library
+
+```python
+import vectorsdb
+
+db = vectorsdb.VectorDB()
+db.create_collection("articles", dimension=384)
+
+db.insert("articles", "Rust is a systems programming language", [0.12, -0.34, 0.56, ...],
+          metadata={"category": "programming", "year": 2024})
+
+# Vector search
+results = db.search("articles", query_embedding=[0.11, -0.33, 0.55, ...], k=10)
+print(results[0].text)      # "Rust is a systems programming language"
+print(results[0].score)     # 0.98
+print(results[0].metadata)  # {"category": "programming", "year": 2024}
+
+# Keyword search
+results = db.search("articles", query_text="systems programming", k=10)
+
+# Hybrid search (vector + keyword)
+results = db.search("articles",
+                    query_embedding=[0.11, -0.33, 0.55, ...],
+                    query_text="systems programming",
+                    k=10, alpha=0.7, fusion_method="rrf")
+
+# Filtered search
+results = db.search("articles", query_embedding=[0.11, -0.33, 0.55, ...], k=10,
+                    filter={"must": [{"field": "category", "op": "eq", "value": "programming"}]})
+```
+
+### REST server
+
+#### Start the server
 
 ```bash
 cargo run --release -- --port 3030 --data-dir ./data
@@ -112,7 +151,20 @@ Response:
 
 ## 2. Installation
 
-### From source
+### Python library
+
+Requires Python 3.9+ and a Rust toolchain.
+
+```bash
+pip install maturin
+git clone <repository-url>
+cd vectors.db/crates/python
+maturin develop --release
+```
+
+After installation, `import vectorsdb` is available. Full IDE autocomplete is provided via PEP 561 type stubs.
+
+### REST server (from source)
 
 ```bash
 git clone <repository-url>
@@ -121,7 +173,7 @@ cargo build --release
 ./target/release/vectors-db --port 3030
 ```
 
-### Docker
+### REST server (Docker)
 
 ```bash
 docker build -t vectors-db .
@@ -131,7 +183,11 @@ docker run -p 3030:3030 -v vectors-data:/data vectors-db
 ### Run tests
 
 ```bash
+# All Rust tests (core + server)
 cargo test
+
+# Python tests
+cd crates/python && maturin develop --release && pytest tests/
 ```
 
 ### Run benchmarks
@@ -149,7 +205,247 @@ cargo bench --bench bm25_nfcorpus
 
 ---
 
-## 3. Configuration
+## 3. Python Library
+
+The Python library provides direct, in-process access to the vectors.db engine. No server, no HTTP overhead — just `import vectorsdb`.
+
+### VectorDB
+
+```python
+db = vectorsdb.VectorDB()                    # ephemeral (in-memory only)
+db = vectorsdb.VectorDB(data_dir="./data")   # with WAL persistence
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `data_dir` | `str | None` | `None` | Directory for WAL persistence and snapshots. If `None`, the database is ephemeral. |
+
+### Collection Management
+
+#### `create_collection(name, dimension, ...)`
+
+```python
+db.create_collection(
+    "my_collection",
+    dimension=768,
+    m=16,                    # optional, default 16
+    ef_construction=200,     # optional, default 200
+    ef_search=50,            # optional, default 50
+    distance_metric="cosine" # optional: "cosine", "euclidean", "dot_product"
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | required | Collection name (must be unique). |
+| `dimension` | `int` | required | Embedding vector dimension. |
+| `m` | `int | None` | `16` | HNSW M parameter — max edges per node. |
+| `ef_construction` | `int | None` | `200` | HNSW build-time search width. |
+| `ef_search` | `int | None` | `50` | HNSW query-time search width. |
+| `distance_metric` | `str | None` | `"cosine"` | Distance metric. |
+
+Raises `ValueError` if the name already exists or the metric is unknown.
+
+#### `delete_collection(name) -> bool`
+
+Returns `True` if the collection existed and was deleted.
+
+#### `list_collections() -> list[str]`
+
+Returns a list of all collection names.
+
+#### `collection_info(name) -> CollectionInfo`
+
+```python
+info = db.collection_info("my_collection")
+print(info.name)                  # "my_collection"
+print(info.dimension)             # 768
+print(info.document_count)        # 15000
+print(info.estimated_memory_bytes) # 268435456
+```
+
+Raises `KeyError` if the collection does not exist.
+
+### Document Operations
+
+#### `insert(collection, text, embedding, metadata=None, id=None) -> str`
+
+```python
+doc_id = db.insert(
+    "my_collection",
+    "Document content for BM25 indexing",
+    [0.1, 0.2, 0.3, ...],
+    metadata={"category": "science", "year": 2024},
+    id="optional-uuid-here"  # auto-generated if omitted
+)
+```
+
+Returns the document UUID as a string.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `collection` | `str` | required | Collection name. |
+| `text` | `str` | required | Document text (indexed by BM25). |
+| `embedding` | `list[float]` | required | Embedding vector. Must match collection dimension. |
+| `metadata` | `dict | None` | `None` | Key-value metadata. Values must be `bool`, `int`, `float`, or `str`. |
+| `id` | `str | None` | `None` | UUID string. Auto-generated if omitted. |
+
+Raises `KeyError` if the collection does not exist. Raises `ValueError` if the embedding dimension doesn't match.
+
+#### `batch_insert(collection, documents) -> list[str]`
+
+```python
+docs = [
+    {"text": "First doc", "embedding": [0.1, ...], "metadata": {"tag": "a"}},
+    {"text": "Second doc", "embedding": [0.2, ...], "metadata": {"tag": "b"}},
+]
+ids = db.batch_insert("my_collection", docs)
+```
+
+Each document dict must have `text` (str) and `embedding` (list[float]). Optional keys: `metadata` (dict), `id` (str).
+
+Returns a list of UUID strings.
+
+#### `get(collection, id) -> dict`
+
+```python
+doc = db.get("my_collection", "a1b2c3d4-...")
+# {"id": "a1b2c3d4-...", "text": "...", "metadata": {...}}
+```
+
+Raises `KeyError` if the collection or document does not exist.
+
+#### `delete(collection, id) -> bool`
+
+Returns `True` if the document existed and was deleted.
+
+### Search
+
+#### `search(collection, ...) -> list[SearchResult]`
+
+Supports three modes depending on which query arguments are provided:
+
+```python
+# Vector search
+results = db.search("col", query_embedding=[0.1, 0.2, ...], k=10)
+
+# Keyword search
+results = db.search("col", query_text="search terms", k=10)
+
+# Hybrid search (vector + keyword)
+results = db.search("col",
+                    query_embedding=[0.1, 0.2, ...],
+                    query_text="search terms",
+                    k=10, alpha=0.7, fusion_method="rrf")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `collection` | `str` | required | Collection name. |
+| `query_embedding` | `list[float] | None` | `None` | Embedding vector for vector/hybrid search. |
+| `query_text` | `str | None` | `None` | Text query for keyword/hybrid search. |
+| `k` | `int` | `10` | Maximum number of results. |
+| `min_similarity` | `float | None` | `None` | Minimum score threshold. |
+| `alpha` | `float` | `0.7` | Hybrid weight: `1.0` = all vector, `0.0` = all keyword. |
+| `fusion_method` | `str` | `"rrf"` | `"rrf"` (reciprocal rank fusion) or `"linear"`. |
+| `filter` | `dict | None` | `None` | Metadata filter (see below). |
+
+Raises `ValueError` if neither `query_embedding` nor `query_text` is provided.
+
+#### SearchResult
+
+```python
+for result in results:
+    print(result.id)        # UUID string
+    print(result.text)      # document text
+    print(result.score)     # relevance score (higher = more similar)
+    print(result.metadata)  # dict
+```
+
+#### Metadata Filtering
+
+Filters use the same syntax as the REST API:
+
+```python
+results = db.search("col", query_embedding=[...], k=10, filter={
+    "must": [
+        {"field": "category", "op": "eq", "value": "science"},
+        {"field": "year", "op": "gte", "value": 2020},
+        {"field": "status", "op": "in", "values": ["published", "reviewed"]}
+    ],
+    "must_not": [
+        {"field": "archived", "op": "eq", "value": True}
+    ]
+})
+```
+
+Supported operators: `eq`, `ne`, `gt`, `lt`, `gte`, `lte`, `in`. See [Search](#6-search) for full details.
+
+### Persistence
+
+#### `save(collection, path=None)`
+
+Saves a collection snapshot to disk as a `.vdb` file. Falls back to `data_dir` from construction if `path` is omitted.
+
+```python
+db = vectorsdb.VectorDB(data_dir="./data")
+db.create_collection("docs", dimension=3)
+db.insert("docs", "hello", [1.0, 0.0, 0.0])
+db.save("docs")  # saves to ./data/docs.vdb
+```
+
+#### `load(name, path=None)`
+
+Loads a collection snapshot from disk. The file is expected at `<path>/<name>.vdb`.
+
+```python
+db = vectorsdb.VectorDB(data_dir="./data")
+db.load("docs")  # loads from ./data/docs.vdb
+```
+
+Raises `ValueError` if no path and no `data_dir` was set. Raises `RuntimeError` if the file doesn't exist or is corrupt.
+
+### Index Management
+
+#### `rebuild(collection) -> int`
+
+Rebuilds the HNSW and BM25 indices, reclaiming space from deleted documents. Returns the number of live documents in the rebuilt index.
+
+```python
+live_count = db.rebuild("my_collection")
+```
+
+#### `total_memory_bytes() -> int`
+
+Returns the estimated total memory usage across all collections in bytes.
+
+```python
+print(f"Memory: {db.total_memory_bytes() / 1024 / 1024:.1f} MB")
+```
+
+### Error Handling
+
+| Exception | When |
+|-----------|------|
+| `KeyError` | Collection or document not found. |
+| `ValueError` | Bad input: wrong embedding dimension, malformed UUID, missing query, unknown metric. |
+| `RuntimeError` | WAL/IO failure, corrupt snapshot file. |
+
+### Examples
+
+See the [`examples/`](examples/) directory for complete working scripts:
+
+| File | Description |
+|------|-------------|
+| `01_quickstart.py` | Basic usage: create, insert, vector/keyword/hybrid search |
+| `02_metadata_filtering.py` | Filter operators, must/must_not clauses |
+| `03_persistence.py` | Save/load snapshots, multiple collections |
+| `04_batch_operations.py` | Batch insert, CRUD, rebuild, benchmarking |
+| `05_distance_metrics.py` | Cosine vs euclidean vs dot product |
+
+---
+
+## 4. Server Configuration
 
 ### CLI Arguments
 
@@ -169,7 +465,7 @@ cargo bench --bench bm25_nfcorpus
 | Variable | Description |
 |----------|-------------|
 | `VECTORS_DB_API_KEY` | Single bearer token for API authentication. If unset, auth is disabled. |
-| `VECTORS_DB_API_KEYS` | JSON array for RBAC configuration (overrides `VECTORS_DB_API_KEY`). See [Authentication](#6-authentication--authorization). |
+| `VECTORS_DB_API_KEYS` | JSON array for RBAC configuration (overrides `VECTORS_DB_API_KEY`). See [Authentication](#7-authentication--authorization). |
 | `RUST_LOG` | Log level filter (e.g., `vectors_db=info`, `vectors_db=debug`). |
 
 ### Example: Production startup
@@ -218,7 +514,7 @@ On successful startup, a structured banner is logged:
 
 ---
 
-## 4. API Reference
+## 5. REST API Reference
 
 ### Health & Metrics (no authentication required)
 
@@ -241,7 +537,7 @@ Returns server status and operational metrics. Returns HTTP 200 when healthy, HT
 
 #### `GET /metrics`
 
-Returns Prometheus-formatted metrics. See [Observability](#10-observability) for available metrics.
+Returns Prometheus-formatted metrics. See [Observability](#11-observability) for available metrics.
 
 ---
 
@@ -433,7 +729,7 @@ Soft-deletes the document. The HNSW node is marked as deleted but the slot is no
 }
 ```
 
-See [Search](#5-search) for detailed search documentation.
+See [Search](#6-search) for detailed search documentation.
 
 ---
 
@@ -507,7 +803,7 @@ Assigns a collection to a specific cluster node:
 
 ---
 
-## 5. Search
+## 6. Search
 
 vectors.db supports three search modes depending on which query fields you provide:
 
@@ -603,7 +899,7 @@ The response includes both `count` (results in this page) and `total` (total mat
 
 ---
 
-## 6. Authentication & Authorization
+## 7. Authentication & Authorization
 
 ### No authentication (development)
 
@@ -661,7 +957,7 @@ Optional `rate_limit_rps` field sets a per-key rate limit (requests per second) 
 
 ---
 
-## 7. Data Model
+## 8. Data Model
 
 ### Document
 
@@ -696,7 +992,7 @@ A collection groups documents that share the same embedding dimension and HNSW c
 
 ---
 
-## 8. Persistence & Durability
+## 9. Persistence & Durability
 
 ### Write-Ahead Log (WAL)
 
@@ -750,7 +1046,7 @@ On SIGINT or SIGTERM:
 
 ---
 
-## 9. Cluster Mode
+## 10. Cluster Mode
 
 vectors.db supports multi-node clustering via Raft consensus for high availability and data replication.
 
@@ -804,7 +1100,7 @@ These are for inter-node communication and should not be called manually:
 
 ---
 
-## 10. Observability
+## 11. Observability
 
 ### Structured logging
 
@@ -854,7 +1150,7 @@ Use this for load balancer health checks and container orchestration probes.
 
 ---
 
-## 11. Security
+## 12. Security
 
 ### Authentication
 
@@ -914,7 +1210,7 @@ Internal error details (file paths, stack traces) are never exposed to API consu
 
 ---
 
-## 12. Architecture
+## 13. Architecture
 
 ### System overview
 
@@ -1008,7 +1304,7 @@ Request processing (outermost to innermost):
 
 ---
 
-## 13. Performance Benchmarks
+## 14. Performance Benchmarks
 
 vectors.db includes a comprehensive benchmark suite using standard ANN-Benchmarks datasets and the BEIR information retrieval benchmark. All benchmarks use a custom harness (no Criterion) and measure real-world performance including quantization overhead.
 
@@ -1162,7 +1458,7 @@ The u8 quantized vectors are used for fast HNSW graph traversal, while original 
 
 ---
 
-## 14. Limits & Defaults
+## 15. Limits & Defaults
 
 ### Input limits
 

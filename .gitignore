@@ -12,6 +12,9 @@ benchmarks/data/nfcorpus/
 # macOS
 .DS_Store
 
+# Cargo (local overrides)
+.cargo/
+
 # IDE
 .idea/
 .vscode/
@@ -20,3 +23,11 @@ benchmarks/data/nfcorpus/
 
 # Claude Code
 .claude/
+
+# Python bindings
+**/__pycache__/
+*.pyc
+*.pyd
+*.so
+.pytest_cache/
+.venv/
