@@ -178,31 +178,47 @@ unsafe fn neon_cosine_f32(a: &[f32], b: &[f32]) -> f32 {
 
     let mut dot0 = vdupq_n_f32(0.0);
     let mut dot1 = vdupq_n_f32(0.0);
+    let mut dot2 = vdupq_n_f32(0.0);
+    let mut dot3 = vdupq_n_f32(0.0);
     let mut na0 = vdupq_n_f32(0.0);
     let mut na1 = vdupq_n_f32(0.0);
+    let mut na2 = vdupq_n_f32(0.0);
+    let mut na3 = vdupq_n_f32(0.0);
     let mut nb0 = vdupq_n_f32(0.0);
     let mut nb1 = vdupq_n_f32(0.0);
+    let mut nb2 = vdupq_n_f32(0.0);
+    let mut nb3 = vdupq_n_f32(0.0);
 
-    let chunks = len / 8;
+    let chunks = len / 16;
     for i in 0..chunks {
-        let base = i * 8;
+        let base = i * 16;
         let a0 = vld1q_f32(a_ptr.add(base));
         let a1 = vld1q_f32(a_ptr.add(base + 4));
+        let a2 = vld1q_f32(a_ptr.add(base + 8));
+        let a3 = vld1q_f32(a_ptr.add(base + 12));
         let b0 = vld1q_f32(b_ptr.add(base));
         let b1 = vld1q_f32(b_ptr.add(base + 4));
+        let b2 = vld1q_f32(b_ptr.add(base + 8));
+        let b3 = vld1q_f32(b_ptr.add(base + 12));
         dot0 = vfmaq_f32(dot0, a0, b0);
         dot1 = vfmaq_f32(dot1, a1, b1);
+        dot2 = vfmaq_f32(dot2, a2, b2);
+        dot3 = vfmaq_f32(dot3, a3, b3);
         na0 = vfmaq_f32(na0, a0, a0);
         na1 = vfmaq_f32(na1, a1, a1);
+        na2 = vfmaq_f32(na2, a2, a2);
+        na3 = vfmaq_f32(na3, a3, a3);
         nb0 = vfmaq_f32(nb0, b0, b0);
         nb1 = vfmaq_f32(nb1, b1, b1);
+        nb2 = vfmaq_f32(nb2, b2, b2);
+        nb3 = vfmaq_f32(nb3, b3, b3);
     }
 
-    let mut dot = vaddvq_f32(vaddq_f32(dot0, dot1));
-    let mut norm_a = vaddvq_f32(vaddq_f32(na0, na1));
-    let mut norm_b = vaddvq_f32(vaddq_f32(nb0, nb1));
+    let mut dot = vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+    let mut norm_a = vaddvq_f32(vaddq_f32(vaddq_f32(na0, na1), vaddq_f32(na2, na3)));
+    let mut norm_b = vaddvq_f32(vaddq_f32(vaddq_f32(nb0, nb1), vaddq_f32(nb2, nb3)));
 
-    for i in (chunks * 8)..len {
+    for i in (chunks * 16)..len {
         let ai = *a_ptr.add(i);
         let bi = *b_ptr.add(i);
         dot += ai * bi;
@@ -336,25 +352,36 @@ unsafe fn neon_cosine_asym_prenorm(
 
     let mut dot0 = vdupq_n_f32(0.0);
     let mut dot1 = vdupq_n_f32(0.0);
+    let mut dot2 = vdupq_n_f32(0.0);
+    let mut dot3 = vdupq_n_f32(0.0);
     let mut ns0 = vdupq_n_f32(0.0);
     let mut ns1 = vdupq_n_f32(0.0);
+    let mut ns2 = vdupq_n_f32(0.0);
+    let mut ns3 = vdupq_n_f32(0.0);
 
-    let chunks = len / 8;
+    let chunks = len / 16;
     for i in 0..chunks {
-        let base = i * 8;
-        let (s_lo, s_hi) = neon_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
-        let q_lo = vld1q_f32(q_ptr.add(base));
-        let q_hi = vld1q_f32(q_ptr.add(base + 4));
-        dot0 = vfmaq_f32(dot0, q_lo, s_lo);
-        dot1 = vfmaq_f32(dot1, q_hi, s_hi);
-        ns0 = vfmaq_f32(ns0, s_lo, s_lo);
-        ns1 = vfmaq_f32(ns1, s_hi, s_hi);
+        let base = i * 16;
+        let (s0, s1) = neon_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
+        let (s2, s3) = neon_u8x8_to_f32_deq(s_ptr.add(base + 8), min_vec, scale_vec);
+        let q0 = vld1q_f32(q_ptr.add(base));
+        let q1 = vld1q_f32(q_ptr.add(base + 4));
+        let q2 = vld1q_f32(q_ptr.add(base + 8));
+        let q3 = vld1q_f32(q_ptr.add(base + 12));
+        dot0 = vfmaq_f32(dot0, q0, s0);
+        dot1 = vfmaq_f32(dot1, q1, s1);
+        dot2 = vfmaq_f32(dot2, q2, s2);
+        dot3 = vfmaq_f32(dot3, q3, s3);
+        ns0 = vfmaq_f32(ns0, s0, s0);
+        ns1 = vfmaq_f32(ns1, s1, s1);
+        ns2 = vfmaq_f32(ns2, s2, s2);
+        ns3 = vfmaq_f32(ns3, s3, s3);
     }
 
-    let mut dot = vaddvq_f32(vaddq_f32(dot0, dot1));
-    let mut norm_s = vaddvq_f32(vaddq_f32(ns0, ns1));
+    let mut dot = vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+    let mut norm_s = vaddvq_f32(vaddq_f32(vaddq_f32(ns0, ns1), vaddq_f32(ns2, ns3)));
 
-    for i in (chunks * 8)..len {
+    for i in (chunks * 16)..len {
         let q = *q_ptr.add(i);
         let s = stored.min + stored.data[i] as f32 * stored.scale;
         dot += q * s;
@@ -376,22 +403,29 @@ unsafe fn neon_euclidean_sq_asym(query: &[f32], stored: VectorRef<'_>) -> f32 {
     let min_vec = vdupq_n_f32(stored.min);
     let scale_vec = vdupq_n_f32(stored.scale);
 
-    let mut s0 = vdupq_n_f32(0.0);
-    let mut s1 = vdupq_n_f32(0.0);
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
 
-    let chunks = len / 8;
+    let chunks = len / 16;
     for i in 0..chunks {
-        let base = i * 8;
-        let (deq_lo, deq_hi) = neon_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
-        let d0 = vsubq_f32(vld1q_f32(q_ptr.add(base)), deq_lo);
-        let d1 = vsubq_f32(vld1q_f32(q_ptr.add(base + 4)), deq_hi);
-        s0 = vfmaq_f32(s0, d0, d0);
-        s1 = vfmaq_f32(s1, d1, d1);
+        let base = i * 16;
+        let (deq0, deq1) = neon_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
+        let (deq2, deq3) = neon_u8x8_to_f32_deq(s_ptr.add(base + 8), min_vec, scale_vec);
+        let d0 = vsubq_f32(vld1q_f32(q_ptr.add(base)), deq0);
+        let d1 = vsubq_f32(vld1q_f32(q_ptr.add(base + 4)), deq1);
+        let d2 = vsubq_f32(vld1q_f32(q_ptr.add(base + 8)), deq2);
+        let d3 = vsubq_f32(vld1q_f32(q_ptr.add(base + 12)), deq3);
+        acc0 = vfmaq_f32(acc0, d0, d0);
+        acc1 = vfmaq_f32(acc1, d1, d1);
+        acc2 = vfmaq_f32(acc2, d2, d2);
+        acc3 = vfmaq_f32(acc3, d3, d3);
     }
 
-    let mut sum = vaddvq_f32(vaddq_f32(s0, s1));
+    let mut sum = vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
 
-    for i in (chunks * 8)..len {
+    for i in (chunks * 16)..len {
         let q = *q_ptr.add(i);
         let s = stored.min + stored.data[i] as f32 * stored.scale;
         let d = q - s;
@@ -408,20 +442,25 @@ unsafe fn neon_dot_product_asym(query: &[f32], stored: VectorRef<'_>) -> f32 {
     let min_vec = vdupq_n_f32(stored.min);
     let scale_vec = vdupq_n_f32(stored.scale);
 
-    let mut s0 = vdupq_n_f32(0.0);
-    let mut s1 = vdupq_n_f32(0.0);
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
 
-    let chunks = len / 8;
+    let chunks = len / 16;
     for i in 0..chunks {
-        let base = i * 8;
-        let (deq_lo, deq_hi) = neon_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
-        s0 = vfmaq_f32(s0, vld1q_f32(q_ptr.add(base)), deq_lo);
-        s1 = vfmaq_f32(s1, vld1q_f32(q_ptr.add(base + 4)), deq_hi);
+        let base = i * 16;
+        let (deq0, deq1) = neon_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
+        let (deq2, deq3) = neon_u8x8_to_f32_deq(s_ptr.add(base + 8), min_vec, scale_vec);
+        acc0 = vfmaq_f32(acc0, vld1q_f32(q_ptr.add(base)), deq0);
+        acc1 = vfmaq_f32(acc1, vld1q_f32(q_ptr.add(base + 4)), deq1);
+        acc2 = vfmaq_f32(acc2, vld1q_f32(q_ptr.add(base + 8)), deq2);
+        acc3 = vfmaq_f32(acc3, vld1q_f32(q_ptr.add(base + 12)), deq3);
     }
 
-    let mut sum = vaddvq_f32(vaddq_f32(s0, s1));
+    let mut sum = vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
 
-    for i in (chunks * 8)..len {
+    for i in (chunks * 16)..len {
         let q = *q_ptr.add(i);
         let s = stored.min + stored.data[i] as f32 * stored.scale;
         sum += q * s;
@@ -594,21 +633,27 @@ unsafe fn avx2_cosine_asym_prenorm(
     let scale_vec = _mm256_set1_ps(stored.scale);
 
     let mut dot0 = _mm256_setzero_ps();
+    let mut dot1 = _mm256_setzero_ps();
     let mut ns0 = _mm256_setzero_ps();
+    let mut ns1 = _mm256_setzero_ps();
 
-    let chunks = len / 8;
+    let chunks = len / 16;
     for i in 0..chunks {
-        let base = i * 8;
-        let deq = avx2_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
-        let q = _mm256_loadu_ps(q_ptr.add(base));
-        dot0 = _mm256_fmadd_ps(q, deq, dot0);
-        ns0 = _mm256_fmadd_ps(deq, deq, ns0);
+        let base = i * 16;
+        let deq0 = avx2_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
+        let deq1 = avx2_u8x8_to_f32_deq(s_ptr.add(base + 8), min_vec, scale_vec);
+        let q0 = _mm256_loadu_ps(q_ptr.add(base));
+        let q1 = _mm256_loadu_ps(q_ptr.add(base + 8));
+        dot0 = _mm256_fmadd_ps(q0, deq0, dot0);
+        dot1 = _mm256_fmadd_ps(q1, deq1, dot1);
+        ns0 = _mm256_fmadd_ps(deq0, deq0, ns0);
+        ns1 = _mm256_fmadd_ps(deq1, deq1, ns1);
     }
 
-    let mut dot = hsum_f32x8(dot0);
-    let mut norm_s = hsum_f32x8(ns0);
+    let mut dot = hsum_f32x8(_mm256_add_ps(dot0, dot1));
+    let mut norm_s = hsum_f32x8(_mm256_add_ps(ns0, ns1));
 
-    for i in (chunks * 8)..len {
+    for i in (chunks * 16)..len {
         let q = *q_ptr.add(i);
         let s = stored.min + stored.data[i] as f32 * stored.scale;
         dot += q * s;
@@ -631,19 +676,23 @@ unsafe fn avx2_euclidean_sq_asym(query: &[f32], stored: VectorRef<'_>) -> f32 {
     let min_vec = _mm256_set1_ps(stored.min);
     let scale_vec = _mm256_set1_ps(stored.scale);
 
-    let mut s0 = _mm256_setzero_ps();
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
 
-    let chunks = len / 8;
+    let chunks = len / 16;
     for i in 0..chunks {
-        let base = i * 8;
-        let deq = avx2_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
-        let d = _mm256_sub_ps(_mm256_loadu_ps(q_ptr.add(base)), deq);
-        s0 = _mm256_fmadd_ps(d, d, s0);
+        let base = i * 16;
+        let deq0 = avx2_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
+        let deq1 = avx2_u8x8_to_f32_deq(s_ptr.add(base + 8), min_vec, scale_vec);
+        let d0 = _mm256_sub_ps(_mm256_loadu_ps(q_ptr.add(base)), deq0);
+        let d1 = _mm256_sub_ps(_mm256_loadu_ps(q_ptr.add(base + 8)), deq1);
+        acc0 = _mm256_fmadd_ps(d0, d0, acc0);
+        acc1 = _mm256_fmadd_ps(d1, d1, acc1);
     }
 
-    let mut sum = hsum_f32x8(s0);
+    let mut sum = hsum_f32x8(_mm256_add_ps(acc0, acc1));
 
-    for i in (chunks * 8)..len {
+    for i in (chunks * 16)..len {
         let q = *q_ptr.add(i);
         let s = stored.min + stored.data[i] as f32 * stored.scale;
         let d = q - s;
@@ -661,18 +710,21 @@ unsafe fn avx2_dot_product_asym(query: &[f32], stored: VectorRef<'_>) -> f32 {
     let min_vec = _mm256_set1_ps(stored.min);
     let scale_vec = _mm256_set1_ps(stored.scale);
 
-    let mut s0 = _mm256_setzero_ps();
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
 
-    let chunks = len / 8;
+    let chunks = len / 16;
     for i in 0..chunks {
-        let base = i * 8;
-        let deq = avx2_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
-        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(q_ptr.add(base)), deq, s0);
+        let base = i * 16;
+        let deq0 = avx2_u8x8_to_f32_deq(s_ptr.add(base), min_vec, scale_vec);
+        let deq1 = avx2_u8x8_to_f32_deq(s_ptr.add(base + 8), min_vec, scale_vec);
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(q_ptr.add(base)), deq0, acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(q_ptr.add(base + 8)), deq1, acc1);
     }
 
-    let mut sum = hsum_f32x8(s0);
+    let mut sum = hsum_f32x8(_mm256_add_ps(acc0, acc1));
 
-    for i in (chunks * 8)..len {
+    for i in (chunks * 16)..len {
         let q = *q_ptr.add(i);
         let s = stored.min + stored.data[i] as f32 * stored.scale;
         sum += q * s;

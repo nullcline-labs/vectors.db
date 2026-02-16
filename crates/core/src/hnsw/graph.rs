@@ -216,21 +216,31 @@ impl HnswIndex {
     }
 
     /// Prefetch quantized vector data for a node (u8 arena + min/scale metadata).
+    /// Prefetches two cache lines for vectors > 64 bytes (dim > 64).
     #[inline(always)]
     pub fn prefetch_vector(&self, id: u32) {
         let start = id as usize * self.dimension;
         if start < self.vector_data.len() {
-            prefetch_read(unsafe { self.vector_data.as_ptr().add(start) });
+            let ptr = unsafe { self.vector_data.as_ptr().add(start) };
+            prefetch_read(ptr);
+            if self.dimension > 64 {
+                prefetch_read(unsafe { ptr.add(64) });
+            }
             prefetch_read(unsafe { self.vector_min.as_ptr().add(id as usize) as *const u8 });
         }
     }
 
     /// Prefetch raw f32 vector data for a node into L1 cache.
+    /// Prefetches two cache lines for vectors > 16 floats (dim > 16).
     #[inline(always)]
     pub fn prefetch_raw_vector(&self, id: u32) {
         let start = id as usize * self.dimension;
         if start < self.raw_vectors.len() {
-            prefetch_read(unsafe { self.raw_vectors.as_ptr().add(start) as *const u8 });
+            let ptr = unsafe { self.raw_vectors.as_ptr().add(start) as *const u8 };
+            prefetch_read(ptr);
+            if self.dimension > 16 {
+                prefetch_read(unsafe { ptr.add(64) });
+            }
         }
     }
 
