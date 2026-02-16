@@ -290,14 +290,14 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
                     index.prefetch_vector(results[i + 1].1);
                 }
                 let vref = index.get_vector_ref(results[i].1);
-                results[i].0 = index
-                    .config
-                    .distance_metric
-                    .distance_asym_prenorm(query, vref, query_norm_sq);
+                results[i].0 =
+                    index
+                        .config
+                        .distance_metric
+                        .distance_asym_prenorm(query, vref, query_norm_sq);
             }
         }
-        results
-            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         results.truncate(k);
         results
