@@ -162,6 +162,7 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRe
 }
 
 /// Get available disk space for the data directory.
+#[allow(clippy::unnecessary_cast)]
 fn disk_available_bytes(data_dir: &str) -> u64 {
     #[cfg(unix)]
     {
@@ -170,6 +171,7 @@ fn disk_available_bytes(data_dir: &str) -> u64 {
         unsafe {
             let mut stat: libc::statvfs = std::mem::zeroed();
             if libc::statvfs(path.as_ptr(), &mut stat) == 0 {
+                // Cast needed: f_bavail/f_frsize are u32 on macOS, u64 on Linux
                 return stat.f_bavail as u64 * stat.f_frsize as u64;
             }
         }
