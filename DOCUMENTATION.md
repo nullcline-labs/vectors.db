@@ -1474,25 +1474,25 @@ Synthetic clustered Gaussian data with brute-force ground truth. Tests vectors.d
 
 | ef_search | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
 |-----------|---------------|--------------|-------------|-----------|
-| 40 | 0.7517 | 0.7559 | 3,791 | 3,042 |
-| 80 | 0.8992 | 0.9060 | 2,313 | 2,071 |
-| 120 | 0.9469 | 0.9580 | 2,036 | 1,663 |
-| 200 | 0.9755 | 0.9879 | 1,673 | 1,367 |
-| 400 | 0.9860 | 0.9994 | 1,295 | 1,081 |
+| 40 | 0.7611 | 0.7536 | 3,756 | 3,727 |
+| 80 | 0.9023 | 0.9028 | 2,452 | 2,482 |
+| 120 | 0.9480 | 0.9538 | 2,004 | 2,064 |
+| 200 | 0.9764 | 0.9869 | 1,595 | 1,686 |
+| 400 | 0.9860 | 0.9993 | 1,209 | 1,311 |
 
-Memory: Compact 73 MB, Exact 366 MB (5x). Build: Compact 353 ins/s, Exact 483 ins/s.
+Memory: Compact 73 MB, Exact 366 MB (5x). Build: Compact 465 ins/s, Exact 368 ins/s.
 
 #### 1536d (25K vectors, Cosine) — OpenAI text-embedding-3-large dimensions
 
 | ef_search | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
 |-----------|---------------|--------------|-------------|-----------|
-| 40 | 0.8914 | 0.8916 | 3,524 | 2,687 |
-| 80 | 0.9640 | 0.9730 | 2,527 | 2,103 |
-| 120 | 0.9804 | 0.9908 | 2,237 | 1,827 |
-| 200 | 0.9868 | 0.9984 | 1,697 | 1,219 |
-| 400 | 0.9880 | 1.0000 | 1,484 | 1,307 |
+| 40 | 0.8924 | 0.8916 | 4,175 | 2,687 |
+| 80 | 0.9636 | 0.9726 | 3,075 | 2,103 |
+| 120 | 0.9802 | 0.9910 | 2,623 | 1,827 |
+| 200 | 0.9868 | 0.9984 | 2,243 | 1,685 |
+| 400 | 0.9880 | 1.0000 | 1,757 | 1,341 |
 
-Memory: Compact 37 MB, Exact 183 MB (5x). Build: Compact 199 ins/s, Exact 308 ins/s.
+Memory: Compact 37 MB, Exact 183 MB (5x). Build: Compact 276 ins/s, Exact 486 ins/s.
 
 > **Key finding**: At high dimensions, exact mode provides significantly better recall than compact mode (+1.3% at 768d, +1.2% at 1536d, ef_search=400). Build speed is now comparable between modes thanks to cached dequantization in the heuristic neighbor selection — compact mode dequantizes each candidate once and caches selected neighbor vectors for fast f32-vs-f32 SIMD distance, eliminating the previous 6x build speed gap. For high-dimensional LLM embeddings, `store_raw_vectors=true` is recommended if RAM permits for the recall improvement.
 

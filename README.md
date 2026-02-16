@@ -237,8 +237,8 @@ Synthetic data at LLM embedding dimensions. Compact vs exact at ef_search=400:
 
 | Dimension | Compact Recall | Exact Recall | Compact QPS | Exact QPS |
 |-----------|---------------|--------------|-------------|-----------|
-| 768d (100K) | 0.9860 | 0.9994 | 1,295 | 1,081 |
-| 1536d (25K) | 0.9880 | 1.0000 | 1,484 | 1,307 |
+| 768d (100K) | 0.9860 | 0.9993 | 1,209 | 1,311 |
+| 1536d (25K) | 0.9880 | 1.0000 | 1,757 | 1,341 |
 
 At high dimensions, exact mode is recommended for maximum recall (+1.3% at 768d). Build speed is comparable between modes thanks to cached dequantization during construction.
 
