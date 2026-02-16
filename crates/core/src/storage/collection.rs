@@ -125,6 +125,19 @@ impl CollectionData {
             ));
         }
 
+        // PQ codes must be consistent if codebook is present
+        if let Some(ref cb) = self.hnsw_index.pq_codebook {
+            let expected_pq_len = nc * cb.num_subspaces;
+            if self.hnsw_index.pq_codes.len() != expected_pq_len {
+                return Err(format!(
+                    "pq_codes length {} != node_count({}) * num_subspaces({})",
+                    self.hnsw_index.pq_codes.len(),
+                    nc,
+                    cb.num_subspaces
+                ));
+            }
+        }
+
         // ID mappings must be symmetric
         if self.uuid_to_internal.len() != self.internal_to_uuid.len() {
             return Err(format!(
@@ -472,6 +485,12 @@ impl Collection {
         total += data.hnsw_index.vector_min.len() * 4;
         total += data.hnsw_index.vector_scale.len() * 4;
 
+        // PQ codes + codebook
+        total += data.hnsw_index.pq_codes.len();
+        if let Some(ref cb) = data.hnsw_index.pq_codebook {
+            total += cb.centroids.len() * 4;
+        }
+
         // HNSW neighbors graph
         for node_neighbors in &data.hnsw_index.neighbors {
             for layer in node_neighbors {
@@ -541,6 +560,9 @@ impl Collection {
             let quantized = QuantizedVector::quantize(embedding);
             new_hnsw.insert(internal_id, embedding, quantized);
         }
+
+        // Train PQ if enabled
+        new_hnsw.train_pq();
 
         let doc_count = live_docs.len();
 

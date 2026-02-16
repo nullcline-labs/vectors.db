@@ -21,6 +21,10 @@ impl HnswIndex {
         if self.entry_point.is_none() {
             self.push_vector(&vector);
             self.push_raw_vector(raw_vector);
+            if let Some(ref cb) = self.pq_codebook {
+                let codes = cb.encode(raw_vector);
+                self.pq_codes.extend_from_slice(&codes);
+            }
             let mut layer_neighbors = Vec::with_capacity(level + 1);
             for _ in 0..=level {
                 layer_neighbors.push(Vec::new());
@@ -59,6 +63,7 @@ impl HnswIndex {
                 query_norm_sq,
                 true,
                 &no_filter,
+                None,
             );
             if let Some(&(_, nearest)) = results.first() {
                 current_ep = nearest;
@@ -87,6 +92,7 @@ impl HnswIndex {
                 query_norm_sq,
                 true,
                 &no_filter,
+                None,
             );
 
             let m_max = if layer == 0 {
@@ -109,6 +115,10 @@ impl HnswIndex {
         // Push the new node's SoA fields
         self.push_vector(&vector);
         self.push_raw_vector(raw_vector);
+        if let Some(ref cb) = self.pq_codebook {
+            let codes = cb.encode(raw_vector);
+            self.pq_codes.extend_from_slice(&codes);
+        }
         self.neighbors.push(node_neighbors);
         self.layers.push(level as u8);
         self.deleted.push(false);

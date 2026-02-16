@@ -24,6 +24,9 @@ benchmarks/data/nfcorpus/
 # Claude Code
 .claude/
 
+# Benchmarks (local-only, not tracked in repo)
+crates/core/benches/
+
 # Python bindings
 **/__pycache__/
 *.pyc

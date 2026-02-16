@@ -5,6 +5,7 @@
 
 use crate::config;
 use crate::hnsw::distance::DistanceMetric;
+use crate::quantization::pq::PqCodebook;
 use crate::quantization::scalar::VectorRef;
 use crate::quantization::QuantizedVector;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,8 @@ pub struct HnswConfig {
     pub max_layers: usize,
     /// Distance function for similarity computation.
     pub distance_metric: DistanceMetric,
+    /// Number of PQ subspaces (0 = PQ disabled, use scalar quantization only).
+    pub pq_subspaces: usize,
 }
 
 impl Default for HnswConfig {
@@ -37,6 +40,7 @@ impl Default for HnswConfig {
             ef_search: config::HNSW_DEFAULT_EF_SEARCH,
             max_layers: config::HNSW_DEFAULT_MAX_LAYERS,
             distance_metric: DistanceMetric::Cosine,
+            pq_subspaces: config::PQ_DEFAULT_SUBSPACES,
         }
     }
 }
@@ -56,6 +60,11 @@ pub struct HnswIndex {
     pub neighbors: Vec<Vec<Vec<u32>>>, // [node_id][layer][neighbor_ids]
     pub layers: Vec<u8>,
     pub deleted: Vec<bool>,
+    // PQ quantization (optional, trained via train_pq)
+    /// PQ codebook (None until training is performed).
+    pub pq_codebook: Option<PqCodebook>,
+    /// PQ codes arena: M bytes per node, contiguous.
+    pub pq_codes: Vec<u8>,
     // Index metadata
     pub entry_point: Option<u32>,
     pub max_layer: usize,
@@ -93,6 +102,8 @@ impl HnswIndex {
             neighbors: Vec::new(),
             layers: Vec::new(),
             deleted: Vec::new(),
+            pq_codebook: None,
+            pq_codes: Vec::new(),
             entry_point: None,
             max_layer: 0,
             dimension,
@@ -194,5 +205,37 @@ impl HnswIndex {
         if start < self.raw_vectors.len() {
             prefetch_read(unsafe { self.raw_vectors.as_ptr().add(start) as *const u8 });
         }
+    }
+
+    /// Get PQ codes for a node (M bytes).
+    #[inline]
+    pub fn get_pq_codes(&self, id: u32) -> &[u8] {
+        let m = self.pq_codebook.as_ref().unwrap().num_subspaces;
+        let start = id as usize * m;
+        &self.pq_codes[start..start + m]
+    }
+
+    /// Prefetch PQ codes for a node into L1 cache.
+    #[inline(always)]
+    pub fn prefetch_pq_codes(&self, id: u32) {
+        if let Some(ref cb) = self.pq_codebook {
+            let start = id as usize * cb.num_subspaces;
+            if start < self.pq_codes.len() {
+                prefetch_read(unsafe { self.pq_codes.as_ptr().add(start) });
+            }
+        }
+    }
+
+    /// Train PQ codebook on current vectors and encode all nodes.
+    /// Does nothing if pq_subspaces is 0 or the index is empty.
+    pub fn train_pq(&mut self) {
+        let m = self.config.pq_subspaces;
+        if m == 0 || self.node_count == 0 {
+            return;
+        }
+        let codebook =
+            PqCodebook::train(&self.raw_vectors, self.dimension, m, config::PQ_NUM_CENTROIDS);
+        self.pq_codes = codebook.encode_batch(&self.raw_vectors, self.dimension);
+        self.pq_codebook = Some(codebook);
     }
 }

@@ -6,6 +6,7 @@
 
 use crate::hnsw::graph::HnswIndex;
 use crate::hnsw::visited::VisitedSet;
+use crate::quantization::pq::PqDistanceTable;
 use ordered_float::OrderedFloat;
 use std::collections::BinaryHeap;
 
@@ -50,7 +51,8 @@ impl PartialOrd for ResultEntry {
 
 /// Compute distance from query to a node in the index.
 /// When `exact` is true, uses f32-vs-f32 raw vectors (no quantization loss).
-/// When `exact` is false, uses f32-vs-u8 asymmetric distance (faster, approximate).
+/// When PQ table is available, uses M table lookups (fastest approximate).
+/// Otherwise, uses f32-vs-u8 asymmetric distance (fast, approximate).
 #[inline]
 fn compute_distance(
     index: &HnswIndex,
@@ -58,10 +60,14 @@ fn compute_distance(
     node_id: u32,
     query_norm_sq: f32,
     exact: bool,
+    pq_table: Option<&PqDistanceTable>,
 ) -> f32 {
     if exact {
         let raw = index.get_raw_vector(node_id);
         index.config.distance_metric.distance_exact(query, raw)
+    } else if let Some(table) = pq_table {
+        let codes = index.get_pq_codes(node_id);
+        table.distance(codes)
     } else {
         let vref = index.get_vector_ref(node_id);
         index
@@ -88,6 +94,7 @@ pub fn search_layer<F: Fn(u32) -> bool>(
     query_norm_sq: f32,
     exact: bool,
     filter_fn: &F,
+    pq_table: Option<&PqDistanceTable>,
 ) -> Vec<(f32, u32)> {
     visited.clear();
     let estimated_visits = ef * 2;
@@ -98,7 +105,7 @@ pub fn search_layer<F: Fn(u32) -> bool>(
 
     for &ep in entry_points {
         if visited.insert(ep) {
-            let dist = compute_distance(index, query, ep, query_norm_sq, exact);
+            let dist = compute_distance(index, query, ep, query_norm_sq, exact, pq_table);
             candidates.push(Candidate {
                 neg_distance: OrderedFloat(-dist),
                 id: ep,
@@ -132,11 +139,13 @@ pub fn search_layer<F: Fn(u32) -> bool>(
         for i in 0..neighbor_list.len() {
             let neighbor_id = neighbor_list[i];
 
-            // Prefetch next neighbor's vector data while processing current
+            // Prefetch next neighbor's data while processing current
             if i + 1 < neighbor_list.len() {
                 let next_id = neighbor_list[i + 1];
                 if exact {
                     index.prefetch_raw_vector(next_id);
+                } else if pq_table.is_some() {
+                    index.prefetch_pq_codes(next_id);
                 } else {
                     index.prefetch_vector(next_id);
                 }
@@ -146,7 +155,8 @@ pub fn search_layer<F: Fn(u32) -> bool>(
                 continue;
             }
 
-            let dist = compute_distance(index, query, neighbor_id, query_norm_sq, exact);
+            let dist =
+                compute_distance(index, query, neighbor_id, query_norm_sq, exact, pq_table);
 
             let should_add = results.len() < ef || dist < worst_dist;
 
@@ -199,6 +209,12 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
     // Precompute query norm squared (constant for this query)
     let query_norm_sq: f32 = query.iter().map(|&x| x * x).sum();
 
+    // Build PQ distance table if codebook is available
+    let pq_table = index.pq_codebook.as_ref().map(|cb| {
+        cb.build_distance_table(query, index.config.distance_metric)
+    });
+    let pq_table_ref = pq_table.as_ref();
+
     // Allocate VisitedSet once, reuse across all layers
     let mut visited = VisitedSet::new(index.node_count as usize);
 
@@ -218,6 +234,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
             query_norm_sq,
             false,
             &no_filter,
+            pq_table_ref,
         );
         if let Some(&(_, nearest)) = results.first() {
             current_ep = nearest;
@@ -236,6 +253,7 @@ pub fn knn_search_filtered<F: Fn(u32) -> bool>(
         query_norm_sq,
         false,
         filter_fn,
+        pq_table_ref,
     );
 
     // Rerank all candidates using exact f32 distances (no quantization loss)

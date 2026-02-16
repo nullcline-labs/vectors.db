@@ -8,5 +8,7 @@
 pub mod scalar;
 /// SIMD-accelerated distance functions (NEON / AVX2 / scalar fallback).
 pub mod simd;
+/// Product Quantization: codebook training, encoding, and asymmetric distance computation.
+pub mod pq;
 
 pub use scalar::{QuantizedVector, VectorRef};

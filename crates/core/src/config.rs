@@ -99,3 +99,12 @@ pub const WAL_GROUP_COMMIT_MAX_BATCH: usize = 128;
 
 /// Maximum wait time (microseconds) to accumulate WAL entries before flushing.
 pub const WAL_GROUP_COMMIT_MAX_WAIT_US: u64 = 1000;
+
+/// Default number of PQ subspaces (0 = disabled, use scalar quantization only).
+pub const PQ_DEFAULT_SUBSPACES: usize = 0;
+
+/// Number of k-means iterations for PQ codebook training.
+pub const PQ_KMEANS_ITERATIONS: usize = 20;
+
+/// Number of centroids per PQ subspace (256 = one byte per code).
+pub const PQ_NUM_CENTROIDS: usize = 256;
