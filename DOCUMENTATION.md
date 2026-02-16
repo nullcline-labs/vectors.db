@@ -1278,10 +1278,10 @@ All vectors are scalar-quantized to u8 for 4x memory reduction vs f32:
 
 #### Two storage modes
 
-| Mode | `store_raw_vectors` | Memory | Recall | Description |
-|------|---------------------|--------|--------|-------------|
-| **Compact** (default) | `false` | ~342 MB/1M×128d | ~0.990 | Only u8 quantized vectors stored. Asymmetric f32-query-vs-u8-stored distance for search and reranking. |
-| **Exact** | `true` | ~830 MB/1M×128d | ~0.997 | Raw f32 vectors stored alongside u8. Exact f32-vs-f32 distance for search, construction, and reranking. |
+| Mode | `store_raw_vectors` | Memory (1M×128d) | Recall@10 (ef=200) | Description |
+|------|---------------------|------------------|-------------------|-------------|
+| **Compact** (default) | `false` | 122 MB | 0.9897 | Only u8 quantized vectors stored. Asymmetric f32-query-vs-u8-stored distance for search and reranking. |
+| **Exact** | `true` | 610 MB | 0.9972 | Raw f32 vectors stored alongside u8. Exact f32-vs-f32 distance for search, construction, and reranking. |
 
 In both modes, distance computation uses **asymmetric distance** during graph traversal: the query vector stays as f32 while stored vectors are accessed as u8 (compact) or f32 (exact). This preserves query precision while saving memory on the stored side.
 
@@ -1327,13 +1327,15 @@ vectors.db includes a comprehensive benchmark suite using standard ANN-Benchmark
 
 #### Summary results
 
-Results on Apple Silicon (M-series), single-threaded:
+Results on Apple Silicon (M-series), single-threaded, compact mode (`store_raw_vectors=false`):
 
-| Dataset | Vectors | Dimensions | Metric | Recall@10 | QPS |
-|---------|---------|------------|--------|-----------|-----|
-| GloVe-25 | 1,183,514 | 25 | Cosine | 0.99+ | ~10,000 |
-| GloVe-100 | 1,000,000 | 100 | Cosine | 0.99+ | ~5,000 |
-| SIFT-128 | 1,000,000 | 128 | Euclidean | 0.99+ | ~4,000 |
+| Dataset | Vectors | Dimensions | Metric | Recall@10 | QPS | Memory |
+|---------|---------|------------|--------|-----------|-----|--------|
+| GloVe-25 | 1,183,514 | 25 | Cosine | 0.99+ | ~10,000 | — |
+| GloVe-100 | 1,000,000 | 100 | Cosine | 0.99+ | ~5,000 | — |
+| SIFT-128 | 1,000,000 | 128 | Euclidean | 0.9916 | 868–6,177 | 122 MB |
+
+With exact mode (`store_raw_vectors=true`), SIFT-128 recall reaches **0.9989** at ef_search=400 (610 MB).
 
 #### GloVe-25 (Cosine, 1.18M vectors, 25 dimensions)
 
@@ -1383,6 +1385,39 @@ Recall vs throughput at different ef_search values:
 
 #### SIFT-128 (Euclidean, 1M vectors, 128 dimensions)
 
+**Compact mode** (`store_raw_vectors=false`, default) — 122 MB, build 1,617 ins/s:
+
+| ef_search | Recall@10 | QPS | Avg Latency |
+|-----------|-----------|-----|-------------|
+| 10 | 0.7675 | 6,177 | 162 us |
+| 20 | 0.8765 | 5,620 | 178 us |
+| 40 | 0.9454 | 4,788 | 209 us |
+| 80 | 0.9775 | 3,585 | 279 us |
+| 120 | 0.9852 | 2,819 | 355 us |
+| 200 | 0.9897 | 1,750 | 571 us |
+| 400 | 0.9916 | 868 | 1,152 us |
+
+**Exact mode** (`store_raw_vectors=true`) — 610 MB, build 1,483 ins/s:
+
+| ef_search | Recall@10 | QPS | Avg Latency |
+|-----------|-----------|-----|-------------|
+| 10 | 0.7712 | 5,745 | 174 us |
+| 20 | 0.8781 | 5,539 | 181 us |
+| 40 | 0.9498 | 3,144 | 318 us |
+| 80 | 0.9840 | 3,050 | 328 us |
+| 120 | 0.9923 | 2,573 | 389 us |
+| 200 | 0.9972 | 1,644 | 608 us |
+| 400 | 0.9989 | 975 | 1,026 us |
+
+**Mode comparison (SIFT-128 at ef_search=200):**
+
+| | Compact | Exact | Delta |
+|---|---------|-------|-------|
+| Recall@10 | 0.9897 | 0.9972 | +0.75% |
+| QPS | 1,750 | 1,644 | -6% |
+| Memory | 122 MB | 610 MB | +400% |
+| Build speed | 1,617 ins/s | 1,483 ins/s | -8% |
+
 **Comparison with other systems (ann-benchmarks.com, SIFT-128, k=10):**
 
 | System | Recall@10 | QPS | Notes |
@@ -1390,14 +1425,15 @@ Recall vs throughput at different ef_search values:
 | scann (Google) | 0.9990 | 13,040 | Quantization + HNSW |
 | Vamana (DiskANN) | 0.9999 | 5,765 | Microsoft |
 | hnsw (nmslib) | 0.9989 | 4,288 | C++ HNSW |
-| **vectors.db** | **0.99+** | **~4,000** | **u8 quantized, Rust** |
 | glass | 0.9999 | 4,007 | Graph-based |
+| **vectors.db (exact)** | **0.9989** | **975** | **u8+f32, Rust, 610 MB** |
+| **vectors.db (compact)** | **0.9916** | **868** | **u8 only, Rust, 122 MB** |
 | hnswlib | 0.9941 | 1,244 | C++ |
 | hnsw (faiss) | 0.9992 | 652 | Facebook |
 | Annoy (Spotify) | 0.9900 | 502 | Tree-based |
 | pgvector | 0.9890 | 16 | PostgreSQL |
 
-> **Note**: vectors.db uses u8 scalar quantization (4x memory reduction) while most reference implementations use f32 vectors. The quantization introduces a small recall penalty but dramatically reduces memory usage and improves cache utilization.
+> **Note**: vectors.db exact mode matches hnsw(nmslib) recall (0.9989) while using scalar quantization. Compact mode trades ~0.7% recall for 5x less memory (122 MB vs 610 MB). Both modes measured at ef_search=400. Most reference implementations use full f32 vectors.
 
 ### BM25 Full-Text Search Benchmark
 
@@ -1458,19 +1494,28 @@ vectors.db offers two storage modes controlled by the `store_raw_vectors` flag:
 
 | Vectors | Dimensions | f32 storage | vectors.db (u8 only) | Savings |
 |---------|------------|-------------|----------------------|---------|
-| 1M | 128 | 488 MB | ~122 MB | ~4x |
+| 1M | 128 | 488 MB | 122 MB | 4x |
 | 1M | 768 | 2.9 GB | ~750 MB | ~4x |
 | 10M | 384 | 14.3 GB | ~3.6 GB | ~4x |
 
 **Exact mode** (`store_raw_vectors: true`) — maximum recall:
 
-| Vectors | Dimensions | f32 storage | vectors.db (u8 + f32) | Savings |
-|---------|------------|-------------|----------------------|---------|
-| 1M | 128 | 488 MB | ~610 MB (u8 + f32) | ~0.8x |
-| 1M | 768 | 2.9 GB | ~3.6 GB | ~0.8x |
-| 10M | 384 | 14.3 GB | ~17.9 GB | ~0.8x |
+| Vectors | Dimensions | f32 storage | vectors.db (u8 + f32) | Overhead |
+|---------|------------|-------------|----------------------|----------|
+| 1M | 128 | 488 MB | 610 MB | +25% vs f32 |
+| 1M | 768 | 2.9 GB | ~3.6 GB | +25% vs f32 |
+| 10M | 384 | 14.3 GB | ~17.9 GB | +25% vs f32 |
 
-Compact mode uses u8 quantized vectors with asymmetric f32-vs-u8 distance for all operations. Exact mode additionally stores raw f32 vectors for exact distance computation during search, reranking, and graph construction. The trade-off is ~0.7% recall improvement at ~59% more RAM.
+**Measured trade-off** (SIFT-128, 1M vectors, ef_search=200):
+
+| | Compact | Exact |
+|---|---------|-------|
+| Memory | 122 MB | 610 MB (+400%) |
+| Recall@10 | 0.9897 | 0.9972 (+0.75%) |
+| QPS | 1,750 | 1,644 (-6%) |
+| Build speed | 1,617 ins/s | 1,483 ins/s (-8%) |
+
+Compact mode uses u8 quantized vectors with asymmetric f32-vs-u8 distance for all operations. Exact mode additionally stores raw f32 vectors for exact distance computation during search, reranking, and graph construction. Compact is recommended for most use cases — 5x less memory with only ~0.7% recall loss.
 
 ---
 

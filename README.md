@@ -130,7 +130,7 @@ POST /collections
 }
 ```
 
-`store_raw_vectors` (default `false`): when `true`, stores raw f32 vectors alongside quantized u8 for exact distance reranking (+0.7% recall, +59% RAM).
+`store_raw_vectors` (default `false`): when `true`, stores raw f32 vectors alongside quantized u8 for exact distance reranking (+0.75% recall, 5x RAM). See [Benchmarks](#benchmarks) for detailed comparison.
 
 ### Insert Document
 
@@ -203,13 +203,33 @@ POST /collections/:name/search
 
 ## Benchmarks
 
-Results on Apple Silicon (M-series), single-threaded:
+Results on Apple Silicon (M-series), single-threaded, SIFT-128 (1M vectors, 128d, Euclidean):
 
-| Dataset | Dimensions | Recall@10 | QPS |
-|---------|-----------|-----------|-----|
-| GloVe-25 | 25 | 0.99+ | ~10k |
-| GloVe-100 | 100 | 0.99+ | ~5k |
-| SIFT-128 | 128 | 0.99+ | ~4k |
+#### Compact mode (`store_raw_vectors=false`, default)
+
+| ef_search | Recall@10 | QPS | Memory |
+|-----------|-----------|-----|--------|
+| 10 | 0.7675 | 6,177 | 122 MB |
+| 40 | 0.9454 | 4,788 | |
+| 120 | 0.9852 | 2,819 | |
+| 200 | 0.9897 | 1,750 | |
+| 400 | 0.9916 | 868 | |
+
+Build: 1,617 inserts/s
+
+#### Exact mode (`store_raw_vectors=true`)
+
+| ef_search | Recall@10 | QPS | Memory |
+|-----------|-----------|-----|--------|
+| 10 | 0.7712 | 5,745 | 610 MB |
+| 40 | 0.9498 | 3,144 | |
+| 120 | 0.9923 | 2,573 | |
+| 200 | 0.9972 | 1,644 | |
+| 400 | 0.9989 | 975 | |
+
+Build: 1,483 inserts/s
+
+Compact mode uses **5x less memory** with only ~0.7% recall loss. Exact mode matches hnsw(nmslib) at 0.9989 recall.
 
 Run benchmarks:
 
