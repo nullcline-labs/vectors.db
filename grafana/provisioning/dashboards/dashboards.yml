@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: vectors.db
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

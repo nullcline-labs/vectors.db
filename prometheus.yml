@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 10s
+
+scrape_configs:
+  - job_name: vectorsdb-primary
+    static_configs:
+      - targets: ["primary:3030"]
+        labels:
+          role: primary
+
+  - job_name: vectorsdb-standby
+    static_configs:
+      - targets: ["standby:3030"]
+        labels:
+          role: standby
