@@ -37,7 +37,10 @@ cd crates/python && maturin develop --release
 ```python
 import vectorsdb
 
-db = vectorsdb.VectorDB()
+# Persistent database with WAL crash recovery
+db = vectorsdb.VectorDB(data_dir="./data")
+# or: db = vectorsdb.VectorDB()  # ephemeral (in-memory only)
+
 db.create_collection("docs", dimension=3)
 
 db.insert("docs", "hello world", [1.0, 0.0, 0.0], metadata={"tag": "greeting"})
@@ -60,9 +63,9 @@ results = db.search("docs", query_embedding=[1.0, 0.0, 0.0], k=5, filter={
     "must": [{"field": "tag", "op": "eq", "value": "greeting"}]
 })
 
-# Persistence
-db.save("docs", path="./data")
-db.load("docs", path="./data")
+# Snapshot + WAL truncation
+db.save("docs")       # saves to ./data/docs.vdb, truncates WAL
+db.compact()          # saves ALL collections + truncates WAL
 ```
 
 Full IDE autocomplete and type hints are included via PEP 561 stubs. See [`examples/`](examples/) for more usage patterns.

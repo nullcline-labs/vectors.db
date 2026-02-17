@@ -226,12 +226,22 @@ The Python library provides direct, in-process access to the vectors.db engine. 
 
 ```python
 db = vectorsdb.VectorDB()                    # ephemeral (in-memory only)
-db = vectorsdb.VectorDB(data_dir="./data")   # with WAL persistence
+db = vectorsdb.VectorDB(data_dir="./data")   # with WAL persistence and crash recovery
+db = vectorsdb.VectorDB(data_dir="./data", encryption_key="<64-char-hex>")  # encrypted
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `data_dir` | `str | None` | `None` | Directory for WAL persistence and snapshots. If `None`, the database is ephemeral. |
+| `data_dir` | `str | None` | `None` | Directory for WAL and snapshots. If provided, enables crash recovery: existing `.vdb` snapshots are loaded and WAL entries are replayed on startup. Every mutation is durably written to the WAL before being applied in-memory. If `None`, the database is ephemeral (no disk I/O). |
+| `encryption_key` | `str | None` | `None` | 64-character hex string for AES-256-GCM encryption of WAL entries and snapshots. |
+
+**Startup recovery sequence** (when `data_dir` is set):
+1. Load all `.vdb` snapshot files from the data directory
+2. Open (or create) the WAL file (`wal.bin`)
+3. Replay WAL entries on top of snapshot state (idempotent)
+4. Database is ready with complete recovered state
+
+**Durability guarantee**: every mutation (insert, delete, batch insert, create/delete collection) is written to the WAL and fsynced to disk before returning. If the process crashes, no committed mutations are lost.
 
 ### Collection Management
 
@@ -398,18 +408,18 @@ Supported operators: `eq`, `ne`, `gt`, `lt`, `gte`, `lte`, `in`. See [Search](#6
 
 ### Persistence
 
-#### `save(collection, path=None)`
+#### `save(collection, path=None, encryption_key=None)`
 
-Saves a collection snapshot to disk as a `.vdb` file. Falls back to `data_dir` from construction if `path` is omitted.
+Saves a collection snapshot to disk as a `.vdb` file. Falls back to `data_dir` from construction if `path` is omitted. When WAL persistence is active, the WAL is frozen during the snapshot and truncated afterward (all data is safely in the snapshot).
 
 ```python
 db = vectorsdb.VectorDB(data_dir="./data")
 db.create_collection("docs", dimension=3)
 db.insert("docs", "hello", [1.0, 0.0, 0.0])
-db.save("docs")  # saves to ./data/docs.vdb
+db.save("docs")  # saves to ./data/docs.vdb + truncates WAL
 ```
 
-#### `load(name, path=None)`
+#### `load(name, path=None, encryption_key=None)`
 
 Loads a collection snapshot from disk. The file is expected at `<path>/<name>.vdb`.
 
@@ -419,6 +429,18 @@ db.load("docs")  # loads from ./data/docs.vdb
 ```
 
 Raises `ValueError` if no path and no `data_dir` was set. Raises `RuntimeError` if the file doesn't exist or is corrupt.
+
+#### `compact()`
+
+Saves all collections to disk and truncates the WAL. This is the recommended way to create a consistent checkpoint. Requires `data_dir` to be set.
+
+```python
+db = vectorsdb.VectorDB(data_dir="./data")
+db.create_collection("col_a", dimension=3)
+db.create_collection("col_b", dimension=5)
+# ... insert data ...
+db.compact()  # saves col_a.vdb + col_b.vdb, truncates WAL
+```
 
 ### Index Management
 
@@ -1036,6 +1058,8 @@ A collection groups documents that share the same embedding dimension and HNSW c
 ### Write-Ahead Log (WAL)
 
 Every mutation (insert, update, delete, create/delete collection) is written to the WAL before being applied in-memory. This ensures no data is lost even on unexpected crashes.
+
+WAL durability is available in both the **REST server** (async WAL with group commit) and the **Python library** (sync WAL with per-entry fsync). In the Python library, WAL is activated automatically when `data_dir` is provided to `VectorDB()`.
 
 **WAL entry format:**
 

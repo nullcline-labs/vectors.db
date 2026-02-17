@@ -657,6 +657,143 @@ class TestMemory:
 
 
 # ===========================================================================
+# WAL crash recovery
+# ===========================================================================
+
+
+class TestWalCrashRecovery:
+    def test_wal_recovery_after_crash(self):
+        """Insert docs without save, drop db, reopen — data should be recovered from WAL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB(data_dir=tmpdir)
+            db1.create_collection("test", dimension=3)
+            db1.insert("test", "doc one", [1.0, 0.0, 0.0])
+            db1.insert("test", "doc two", [0.0, 1.0, 0.0])
+            db1.insert("test", "doc three", [0.0, 0.0, 1.0])
+            del db1  # no save — simulate crash
+
+            db2 = vectorsdb.VectorDB(data_dir=tmpdir)
+            assert db2.collection_info("test").document_count == 3
+            results = db2.search("test", query_embedding=[1.0, 0.0, 0.0], k=3)
+            assert len(results) == 3
+            texts = {r.text for r in results}
+            assert "doc one" in texts
+
+    def test_wal_recovery_after_save(self):
+        """Insert, save, insert more, crash — all data should be recovered."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB(data_dir=tmpdir)
+            db1.create_collection("test", dimension=3)
+            db1.insert("test", "saved doc", [1.0, 0.0, 0.0])
+            db1.save("test")  # snapshot + WAL truncate
+
+            db1.insert("test", "unsaved doc", [0.0, 1.0, 0.0])
+            del db1  # crash after unsaved insert
+
+            db2 = vectorsdb.VectorDB(data_dir=tmpdir)
+            assert db2.collection_info("test").document_count == 2
+            results = db2.search("test", query_embedding=[0.0, 1.0, 0.0], k=1)
+            assert results[0].text == "unsaved doc"
+
+    def test_wal_truncation_on_save(self):
+        """After save, WAL should be truncated (small file)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB(data_dir=tmpdir)
+            db1.create_collection("test", dimension=3)
+            for i in range(20):
+                db1.insert("test", f"doc {i}", [float(i), 0.0, 0.0])
+
+            wal_path = os.path.join(tmpdir, "wal.bin")
+            assert os.path.exists(wal_path)
+            wal_size_before = os.path.getsize(wal_path)
+            assert wal_size_before > 0
+
+            db1.save("test")
+            wal_size_after = os.path.getsize(wal_path)
+            assert wal_size_after < wal_size_before
+
+    def test_ephemeral_no_wal(self):
+        """VectorDB without data_dir should not create WAL files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB()
+            db1.create_collection("test", dimension=3)
+            db1.insert("test", "ephemeral", [1.0, 0.0, 0.0])
+            # No files should be created anywhere
+            assert not os.path.exists(os.path.join(tmpdir, "wal.bin"))
+
+    def test_wal_collection_operations(self):
+        """Create and delete collections are recovered from WAL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB(data_dir=tmpdir)
+            db1.create_collection("col_a", dimension=3)
+            db1.create_collection("col_b", dimension=5)
+            db1.insert("col_a", "hello", [1.0, 0.0, 0.0])
+            db1.delete_collection("col_b")
+            del db1
+
+            db2 = vectorsdb.VectorDB(data_dir=tmpdir)
+            names = db2.list_collections()
+            assert "col_a" in names
+            assert "col_b" not in names
+            assert db2.collection_info("col_a").document_count == 1
+
+    def test_wal_delete_document_recovery(self):
+        """Document deletion is recovered from WAL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB(data_dir=tmpdir)
+            db1.create_collection("test", dimension=3)
+            doc_id = db1.insert("test", "to be deleted", [1.0, 0.0, 0.0])
+            db1.insert("test", "kept", [0.0, 1.0, 0.0])
+            db1.delete("test", doc_id)
+            del db1
+
+            db2 = vectorsdb.VectorDB(data_dir=tmpdir)
+            assert db2.collection_info("test").document_count == 1
+            results = db2.search("test", query_embedding=[0.0, 1.0, 0.0], k=5)
+            assert len(results) == 1
+            assert results[0].text == "kept"
+
+    def test_wal_batch_insert_recovery(self):
+        """Batch insert is recovered from WAL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB(data_dir=tmpdir)
+            db1.create_collection("test", dimension=3)
+            docs = [
+                {"text": f"batch doc {i}", "embedding": [float(i), 0.0, 0.0]}
+                for i in range(5)
+            ]
+            db1.batch_insert("test", docs)
+            del db1
+
+            db2 = vectorsdb.VectorDB(data_dir=tmpdir)
+            assert db2.collection_info("test").document_count == 5
+
+    def test_compact_saves_all_and_truncates(self):
+        """compact() saves all collections and truncates WAL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db1 = vectorsdb.VectorDB(data_dir=tmpdir)
+            db1.create_collection("col_a", dimension=3)
+            db1.create_collection("col_b", dimension=2)
+            db1.insert("col_a", "a doc", [1.0, 0.0, 0.0])
+            db1.insert("col_b", "b doc", [1.0, 0.0])
+            db1.compact()
+
+            # Snapshots should exist
+            assert os.path.exists(os.path.join(tmpdir, "col_a.vdb"))
+            assert os.path.exists(os.path.join(tmpdir, "col_b.vdb"))
+
+            # WAL should be truncated
+            wal_path = os.path.join(tmpdir, "wal.bin")
+            assert os.path.getsize(wal_path) == 0
+
+            # Data survives reopen
+            del db1
+            db2 = vectorsdb.VectorDB(data_dir=tmpdir)
+            assert db2.collection_info("col_a").document_count == 1
+            assert db2.collection_info("col_b").document_count == 1
+
+
+# ===========================================================================
 # VectorDB repr
 # ===========================================================================
 

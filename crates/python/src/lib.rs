@@ -16,7 +16,9 @@ use vectorsdb_core::filter_types::{FilterClause, FilterCondition, FilterOperator
 use vectorsdb_core::hnsw::distance::DistanceMetric;
 use vectorsdb_core::hnsw::graph::HnswConfig;
 use vectorsdb_core::storage::crypto::EncryptionKey;
-use vectorsdb_core::storage::{load_collection, save_collection, Database};
+use vectorsdb_core::storage::{
+    load_all_collections, load_collection, save_collection, Database, SyncWriteAheadLog, WalEntry,
+};
 
 // ---------------------------------------------------------------------------
 // Helper: Python dict → HashMap<String, MetadataValue>
@@ -241,20 +243,79 @@ impl CollectionInfo {
 /// Create ephemeral or persistent databases:
 ///
 ///     db = VectorDB()                    # ephemeral (in-memory only)
-///     db = VectorDB(data_dir="./data")   # with WAL persistence
+///     db = VectorDB(data_dir="./data")   # with WAL persistence and crash recovery
 #[pyclass]
 struct VectorDB {
     db: Arc<Database>,
+    wal: Option<SyncWriteAheadLog>,
+    encryption_key: Option<Arc<EncryptionKey>>,
     data_dir: Option<String>,
 }
 
 #[pymethods]
 impl VectorDB {
+    /// Create a new VectorDB instance.
+    ///
+    /// Args:
+    ///     data_dir: Directory for WAL and snapshots. If provided, enables
+    ///         crash recovery via Write-Ahead Log. If None, the database is ephemeral.
+    ///     encryption_key: Optional 64-char hex string for AES-256-GCM encryption
+    ///         of WAL entries and snapshots.
     #[new]
-    #[pyo3(signature = (data_dir=None))]
-    fn new(data_dir: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (data_dir=None, encryption_key=None))]
+    fn new(data_dir: Option<String>, encryption_key: Option<&str>) -> PyResult<Self> {
+        let db = Arc::new(Database::new());
+
+        let enc_key = encryption_key
+            .map(|hex| EncryptionKey::from_hex(hex).map_err(PyValueError::new_err))
+            .transpose()?
+            .map(Arc::new);
+
+        let wal = if let Some(ref dir) = data_dir {
+            // Load existing snapshots
+            match load_all_collections(dir, enc_key.as_deref()) {
+                Ok(collections) => {
+                    let mut db_collections = db.collections.write();
+                    for collection in collections {
+                        let name = collection.data.read().name.clone();
+                        db_collections.insert(name, collection);
+                    }
+                }
+                Err(e) => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "failed to load snapshots from '{}': {}",
+                        dir, e
+                    )));
+                }
+            }
+
+            // Open WAL and replay entries
+            let wal = SyncWriteAheadLog::new(dir, enc_key.clone())
+                .map_err(|e| PyRuntimeError::new_err(format!("failed to open WAL: {}", e)))?;
+
+            match wal.replay() {
+                Ok((entries, _stats)) => {
+                    if !entries.is_empty() {
+                        db.replay_wal(&entries);
+                    }
+                }
+                Err(e) => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "WAL replay failed: {}",
+                        e
+                    )));
+                }
+            }
+
+            Some(wal)
+        } else {
+            None
+        };
+
         Ok(Self {
-            db: Arc::new(Database::new()),
+            db,
+            wal,
+            encryption_key: enc_key,
             data_dir,
         })
     }
@@ -310,14 +371,32 @@ impl VectorDB {
             config.store_raw_vectors = store_raw;
         }
 
+        if let Some(ref wal) = self.wal {
+            let entry = WalEntry::CreateCollection {
+                name: name.clone(),
+                dimension,
+                config: config.clone(),
+            };
+            wal.append(&entry)
+                .map_err(|e| PyRuntimeError::new_err(format!("WAL write failed: {}", e)))?;
+        }
+
         self.db
             .create_collection(name, dimension, Some(config))
             .map_err(PyValueError::new_err)
     }
 
     /// Delete a collection by name. Returns True if it existed.
-    fn delete_collection(&self, name: &str) -> bool {
-        self.db.delete_collection(name)
+    fn delete_collection(&self, name: &str) -> PyResult<bool> {
+        if let Some(ref wal) = self.wal {
+            let entry = WalEntry::DeleteCollection {
+                name: name.to_string(),
+            };
+            wal.append(&entry)
+                .map_err(|e| PyRuntimeError::new_err(format!("WAL write failed: {}", e)))?;
+        }
+
+        Ok(self.db.delete_collection(name))
     }
 
     /// List all collection names.
@@ -376,6 +455,16 @@ impl VectorDB {
             None => Document::new(text, meta),
         };
 
+        if let Some(ref wal) = self.wal {
+            let entry = WalEntry::InsertDocument {
+                collection_name: collection.to_string(),
+                document: doc.clone(),
+                embedding: embedding.clone(),
+            };
+            wal.append(&entry)
+                .map_err(|e| PyRuntimeError::new_err(format!("WAL write failed: {}", e)))?;
+        }
+
         let doc_id = col.insert_document(doc, embedding);
         Ok(doc_id.to_string())
     }
@@ -393,7 +482,7 @@ impl VectorDB {
             .get_collection(collection)
             .ok_or_else(|| PyKeyError::new_err(format!("collection '{}' not found", collection)))?;
 
-        let mut ids = Vec::with_capacity(documents.len());
+        let mut doc_emb_pairs = Vec::with_capacity(documents.len());
         for item in documents.iter() {
             let dict: &Bound<'_, PyDict> = item.downcast()?;
             let text: String = dict
@@ -418,7 +507,20 @@ impl VectorDB {
             } else {
                 Document::new(text, meta)
             };
+            doc_emb_pairs.push((doc, embedding));
+        }
 
+        if let Some(ref wal) = self.wal {
+            let entry = WalEntry::InsertDocumentBatch {
+                collection_name: collection.to_string(),
+                documents: doc_emb_pairs.clone(),
+            };
+            wal.append(&entry)
+                .map_err(|e| PyRuntimeError::new_err(format!("WAL write failed: {}", e)))?;
+        }
+
+        let mut ids = Vec::with_capacity(doc_emb_pairs.len());
+        for (doc, embedding) in doc_emb_pairs {
             let doc_id = col.insert_document(doc, embedding);
             ids.push(doc_id.to_string());
         }
@@ -455,6 +557,15 @@ impl VectorDB {
 
         let uuid = Uuid::parse_str(id)
             .map_err(|e| PyValueError::new_err(format!("invalid UUID: {}", e)))?;
+
+        if let Some(ref wal) = self.wal {
+            let entry = WalEntry::DeleteDocument {
+                collection_name: collection.to_string(),
+                document_id: uuid,
+            };
+            wal.append(&entry)
+                .map_err(|e| PyRuntimeError::new_err(format!("WAL write failed: {}", e)))?;
+        }
 
         Ok(col.delete_document(&uuid))
     }
@@ -549,6 +660,7 @@ impl VectorDB {
     ///
     /// Uses the data_dir passed at construction, or a custom path.
     /// If encryption_key is provided (64-char hex), the snapshot is encrypted with AES-256-GCM.
+    /// When WAL persistence is active, the WAL is truncated after a successful save.
     #[pyo3(signature = (collection, path=None, encryption_key=None))]
     fn save(
         &self,
@@ -571,9 +683,21 @@ impl VectorDB {
         let enc_key = encryption_key
             .map(|hex| EncryptionKey::from_hex(hex).map_err(PyValueError::new_err))
             .transpose()?;
+        let enc_ref = enc_key.as_ref().or(self.encryption_key.as_deref());
 
-        save_collection(&col, &dir, enc_key.as_ref())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        // If WAL is active, freeze writes during snapshot
+        let _gate = self.wal.as_ref().map(|w| w.freeze());
+
+        save_collection(&col, &dir, enc_ref)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        // Truncate WAL after successful snapshot
+        if let Some(ref wal) = self.wal {
+            wal.truncate()
+                .map_err(|e| PyRuntimeError::new_err(format!("WAL truncate failed: {}", e)))?;
+        }
+
+        Ok(())
     }
 
     /// Load a collection snapshot from disk.
@@ -612,6 +736,34 @@ impl VectorDB {
         // Replace with the loaded collection directly
         let mut collections = self.db.collections.write();
         collections.insert(name.to_string(), collection);
+
+        Ok(())
+    }
+
+    /// Save all collections to disk and truncate the WAL.
+    ///
+    /// This is the recommended way to create a consistent checkpoint. After compact,
+    /// the WAL is empty and all data is in snapshots. Requires data_dir to be set.
+    fn compact(&self) -> PyResult<()> {
+        let dir = self.data_dir.as_ref().ok_or_else(|| {
+            PyValueError::new_err("compact requires data_dir to be set")
+        })?;
+
+        let enc_ref = self.encryption_key.as_deref();
+        let _gate = self.wal.as_ref().map(|w| w.freeze());
+
+        let names = self.db.list_collections();
+        for name in &names {
+            if let Some(col) = self.db.get_collection(name) {
+                save_collection(&col, dir, enc_ref)
+                    .map_err(|e| PyRuntimeError::new_err(format!("save '{}' failed: {}", name, e)))?;
+            }
+        }
+
+        if let Some(ref wal) = self.wal {
+            wal.truncate()
+                .map_err(|e| PyRuntimeError::new_err(format!("WAL truncate failed: {}", e)))?;
+        }
 
         Ok(())
     }
