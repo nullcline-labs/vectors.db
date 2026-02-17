@@ -1,0 +1,30 @@
+services:
+  primary:
+    build: .
+    ports:
+      - "3030:3030"
+      - "3031:3031"
+    volumes:
+      - primary-data:/data
+    command: ["--port", "3030", "--replication-port", "3031"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3030/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  standby:
+    build: .
+    ports:
+      - "3040:3030"
+    volumes:
+      - standby-data:/data
+    command: ["--port", "3030", "--standby-of", "primary:3031"]
+    depends_on:
+      primary:
+        condition: service_healthy
+
+volumes:
+  primary-data:
+  standby-data:
