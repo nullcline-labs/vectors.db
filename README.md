@@ -20,7 +20,7 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 - **WAL streaming replication** — active-passive HA with automatic snapshot sync and real-time WAL streaming
 - **Structured audit logging** — WHO/WHAT/WHEN for all mutations, filterable via `RUST_LOG=audit=info`
 - **Bearer token authentication** via `VECTORS_DB_API_KEY`
-- **Prometheus metrics** at `/metrics`
+- **Prometheus metrics** at `/metrics` with prebuilt **Grafana dashboard**
 - **Request timeout** (30s) and **rate limiting** (100 req/s)
 - **Batch insert** up to 1000 documents per request
 - **Multiple distance metrics**: Cosine, Euclidean, Dot Product
@@ -81,6 +81,15 @@ cargo run --release -- --port 3030 --data-dir ./data
 docker build -t vectors-db .
 docker run -p 3030:3030 -v vectors-data:/data vectors-db
 ```
+
+#### Docker Compose (primary + standby)
+
+```bash
+docker compose up -d                           # primary + standby
+docker compose --profile monitoring up -d      # + Prometheus + Grafana
+```
+
+Grafana dashboard at [http://localhost:3000](http://localhost:3000), Prometheus at [http://localhost:9090](http://localhost:9090).
 
 #### First steps
 

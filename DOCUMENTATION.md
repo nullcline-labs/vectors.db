@@ -181,6 +181,18 @@ docker build -t vectors-db .
 docker run -p 3030:3030 -v vectors-data:/data vectors-db
 ```
 
+### Docker Compose (primary + standby + monitoring)
+
+```bash
+# Primary + standby replication
+docker compose up -d
+
+# Primary + standby + Prometheus + Grafana
+docker compose --profile monitoring up -d
+```
+
+Grafana dashboard at [http://localhost:3000](http://localhost:3000). See [Observability](#12-observability) for details.
+
 ### Run tests
 
 ```bash
@@ -1303,12 +1315,69 @@ Available at `GET /metrics` (no authentication required).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
+| `http_requests_total` | Counter | `method`, `path`, `status` | HTTP requests by endpoint and status code |
+| `http_request_duration_seconds` | Histogram | `method`, `path` | Request latency distribution (seconds) |
 | `vectorsdb_operations_total` | Counter | `collection`, `operation` | Write operations (insert, batch_insert, delete, update, create, drop) |
 | `vectorsdb_search_total` | Counter | `collection`, `type` | Search operations (vector, keyword, hybrid) |
-| `http_requests_total` | Counter | `method`, `path`, `status` | HTTP requests by endpoint and status code |
-| `http_request_duration_seconds` | Histogram | `method`, `path` | Request latency distribution |
-| Collection gauges | Gauge | `collection` | Document count, memory usage per collection |
-| WAL size | Gauge | | Current WAL file size in bytes |
+| `vectorsdb_collections_total` | Gauge | — | Total number of collections |
+| `vectorsdb_documents_total` | Gauge | `collection` | Document count per collection |
+| `vectorsdb_deleted_total` | Gauge | `collection` | Soft-deleted documents per collection |
+| `vectorsdb_collection_memory_bytes` | Gauge | `collection` | Estimated memory usage per collection |
+| `vectorsdb_wal_size_bytes` | Gauge | — | Current WAL file size in bytes |
+
+### Grafana dashboard
+
+A prebuilt Grafana dashboard is included with 13 panels covering all key metrics:
+
+| Panel | Type | Description |
+|-------|------|-------------|
+| HTTP Request Rate | timeseries | Requests per second by status code |
+| Request Latency | timeseries | p50 / p95 / p99 latency percentiles |
+| Error Rate | timeseries | 4xx and 5xx errors per second |
+| Search Rate by Type | timeseries | Vector / keyword / hybrid searches per second |
+| Write Operations Rate | timeseries | Insert / delete / update / batch operations per second |
+| Documents per Collection | timeseries | Document count over time, per collection |
+| Deleted Documents | timeseries | Soft-deleted documents per collection |
+| Memory per Collection | timeseries | Memory usage per collection in bytes |
+| WAL Size | timeseries | Write-Ahead Log file size in bytes |
+| Collections Count | stat | Total number of collections |
+| Total Documents | stat | Total documents across all collections |
+| Total Memory | stat | Aggregate memory usage |
+| Request Rate | stat | Total requests per second |
+
+The dashboard includes a `$collection` template variable for filtering panels by collection name.
+
+### Docker Compose monitoring stack
+
+Start the full monitoring stack with a single command:
+
+```bash
+docker compose --profile monitoring up -d
+```
+
+This starts four services:
+
+| Service | Port | Description |
+|---------|------|-------------|
+| **primary** | 3030, 3031 | Primary vectors.db node (API + replication) |
+| **standby** | 3040 | Standby read-only replica |
+| **prometheus** | 9090 | Metrics scraping (10s interval) |
+| **grafana** | 3000 | Dashboard UI (anonymous admin, auto-provisioned) |
+
+Prometheus scrapes both primary and standby nodes. The Grafana dashboard and datasource are auto-provisioned on startup — no manual configuration needed.
+
+**Access points:**
+
+- Grafana dashboard: [http://localhost:3000](http://localhost:3000)
+- Prometheus UI: [http://localhost:9090](http://localhost:9090)
+- Primary API: [http://localhost:3030](http://localhost:3030)
+- Standby API: [http://localhost:3040](http://localhost:3040)
+
+Without the `monitoring` profile, only primary and standby are started:
+
+```bash
+docker compose up -d
+```
 
 ### Health check
 
