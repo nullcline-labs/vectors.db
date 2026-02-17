@@ -111,3 +111,7 @@ pub const PQ_KMEANS_ITERATIONS: usize = 20;
 
 /// Number of centroids per PQ subspace (256 = one byte per code).
 pub const PQ_NUM_CENTROIDS: usize = 256;
+
+/// Default auto-compaction threshold: rebuild when >20% of nodes are deleted.
+/// Set to 0.0 to disable auto-compaction.
+pub const DEFAULT_AUTO_COMPACT_RATIO: f32 = 0.2;

@@ -605,4 +605,164 @@ mod tests {
         assert_eq!(vref.min, q.min);
         assert_eq!(vref.scale, q.scale);
     }
+
+    // ── Edge cases: empty, single, dim ───────────────────────────────
+
+    #[test]
+    fn test_quantize_empty_vector() {
+        let q = QuantizedVector::quantize(&[]);
+        assert_eq!(q.data.len(), 0);
+        assert_eq!(q.min, 0.0);
+        assert_eq!(q.max, 0.0);
+        assert_eq!(q.scale, 0.0);
+        assert_eq!(q.dim(), 0);
+        assert!(q.dequantize().is_empty());
+    }
+
+    #[test]
+    fn test_quantize_single_element() {
+        let q = QuantizedVector::quantize(&[3.14]);
+        assert_eq!(q.dim(), 1);
+        assert_eq!(q.scale, 0.0); // constant vector
+        let d = q.dequantize();
+        assert!((d[0] - 3.14).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_dim_method() {
+        let q = QuantizedVector::quantize(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(q.dim(), 5);
+    }
+
+    #[test]
+    fn test_quantize_large_range() {
+        let v = vec![-1000.0, 0.0, 1000.0];
+        let q = QuantizedVector::quantize(&v);
+        assert!(q.scale > 0.0);
+        let d = q.dequantize();
+        for (orig, deq) in v.iter().zip(d.iter()) {
+            assert!((orig - deq).abs() < 10.0, "orig={orig}, deq={deq}");
+        }
+    }
+
+    // ── Remainder loop tests (non-multiple of CHUNK/CHUNK_F32) ───────
+
+    #[test]
+    fn test_cosine_ref_remainder() {
+        // 40 elements: 32 full chunk + 8 remainder
+        let v: Vec<f32> = (1..=40).map(|i| i as f32 * 0.1).collect();
+        let q = QuantizedVector::quantize(&v);
+        let sim = cosine_similarity_ref(q.as_ref(), q.as_ref());
+        assert!(sim > 0.99, "self-similarity should be ~1.0, got {sim}");
+    }
+
+    #[test]
+    fn test_euclidean_ref_remainder() {
+        let v: Vec<f32> = (1..=50).map(|i| i as f32 * 0.5).collect();
+        let q = QuantizedVector::quantize(&v);
+        let d = euclidean_distance_sq_ref(q.as_ref(), q.as_ref());
+        assert!(d < 1.0, "self-distance should be ~0, got {d}");
+    }
+
+    #[test]
+    fn test_dot_product_ref_remainder() {
+        let v: Vec<f32> = (1..=45).map(|i| i as f32 * 0.1).collect();
+        let q = QuantizedVector::quantize(&v);
+        let dp = dot_product_ref(q.as_ref(), q.as_ref());
+        assert!(dp > 0.0, "self-dot should be positive");
+    }
+
+    #[test]
+    fn test_cosine_asym_remainder() {
+        // 20 elements: 2*8 full chunks + 4 remainder
+        let v: Vec<f32> = (1..=20).map(|i| i as f32).collect();
+        let q = QuantizedVector::quantize(&v);
+        let sim = cosine_similarity_asym(&v, q.as_ref());
+        assert!(sim > 0.98, "asym self-sim should be ~1.0, got {sim}");
+    }
+
+    #[test]
+    fn test_cosine_asym_prenorm_remainder() {
+        let v: Vec<f32> = (1..=20).map(|i| i as f32).collect();
+        let norm_sq: f32 = v.iter().map(|x| x * x).sum();
+        let q = QuantizedVector::quantize(&v);
+        let sim = cosine_similarity_asym_prenorm(&v, q.as_ref(), norm_sq);
+        assert!(
+            sim > 0.98,
+            "asym prenorm self-sim should be ~1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_euclidean_asym_remainder() {
+        let v: Vec<f32> = (1..=25).map(|i| i as f32).collect();
+        let q = QuantizedVector::quantize(&v);
+        let d = euclidean_distance_sq_asym(&v, q.as_ref());
+        assert!(d < 1.0, "asym self-distance should be ~0, got {d}");
+    }
+
+    #[test]
+    fn test_dot_product_asym_remainder() {
+        let v: Vec<f32> = (1..=35).map(|i| i as f32).collect();
+        let q = QuantizedVector::quantize(&v);
+        let dp = dot_product_asym(&v, q.as_ref());
+        assert!(dp > 0.0, "asym self-dot should be positive");
+    }
+
+    // ── Zero/near-zero edge cases ────────────────────────────────────
+
+    #[test]
+    fn test_cosine_asym_zero_query() {
+        let query = vec![0.0, 0.0, 0.0];
+        let stored = vec![1.0, 2.0, 3.0];
+        let q = QuantizedVector::quantize(&stored);
+        let sim = cosine_similarity_asym(&query, q.as_ref());
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn test_cosine_asym_prenorm_small_norm() {
+        let query = vec![1e-6, 0.0, 0.0];
+        let stored = vec![1.0, 2.0, 3.0];
+        let q = QuantizedVector::quantize(&stored);
+        // query_norm_sq < 1e-10 → early return 0
+        let sim = cosine_similarity_asym_prenorm(&query, q.as_ref(), 1e-11);
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn test_cosine_ref_near_zero_denom() {
+        // Both constant vectors → scale=0 → early return 0
+        let a = vec![5.0; 4];
+        let b = vec![3.0; 4];
+        let qa = QuantizedVector::quantize(&a);
+        let qb = QuantizedVector::quantize(&b);
+        let sim = cosine_similarity_ref(qa.as_ref(), qb.as_ref());
+        assert_eq!(sim, 0.0);
+    }
+
+    // ── Opposite direction ───────────────────────────────────────────
+
+    #[test]
+    fn test_cosine_ref_opposite_vectors() {
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let b = vec![-1.0, -2.0, -3.0, -4.0];
+        let qa = QuantizedVector::quantize(&a);
+        let qb = QuantizedVector::quantize(&b);
+        let sim = cosine_similarity_ref(qa.as_ref(), qb.as_ref());
+        assert!(
+            sim < -0.8,
+            "opposite vectors should have negative sim, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_euclidean_ref_different_vectors() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 1.0, 1.0];
+        let qa = QuantizedVector::quantize(&a);
+        let qb = QuantizedVector::quantize(&b);
+        let d = euclidean_distance_sq_ref(qa.as_ref(), qb.as_ref());
+        assert!(d > 1.0, "should have non-zero distance, got {d}");
+    }
 }

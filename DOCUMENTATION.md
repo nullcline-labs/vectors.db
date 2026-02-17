@@ -1,6 +1,6 @@
 # vectors.db Documentation
 
-A lightweight, high-performance, in-memory vector database written in Rust. Features HNSW approximate nearest neighbor search, BM25 full-text search, hybrid retrieval with Reciprocal Rank Fusion, scalar quantization for 4x memory reduction, Write-Ahead Log for crash recovery, Role-Based Access Control, Prometheus metrics, TLS support, and optional Raft-based multi-node clustering.
+A lightweight, high-performance, in-memory vector database written in Rust. Features HNSW approximate nearest neighbor search, BM25 full-text search, hybrid retrieval with Reciprocal Rank Fusion, scalar quantization for 4x memory reduction, Write-Ahead Log for crash recovery, automatic compaction of deleted nodes, Role-Based Access Control, Prometheus metrics, TLS support, and optional Raft-based multi-node clustering.
 
 vectors.db can be used in two ways:
 
@@ -457,6 +457,9 @@ See the [`examples/`](examples/) directory for complete working scripts:
 | `--data-dir` | `-d` | `./data` | Directory for WAL and snapshot files |
 | `--max-memory-mb` | | `0` (unlimited) | Maximum memory usage in MB. Returns HTTP 507 when exceeded. Health degrades at 90%. |
 | `--snapshot-interval` | | `300` | Automatic snapshot interval in seconds. `0` disables auto-snapshots. |
+| `--auto-compact-ratio` | | `0.2` | Rebuild indices when deleted nodes exceed this ratio (0.0 = disabled). Checked after each periodic snapshot. |
+| `--wal-strict` | | `false` | Fail startup if WAL replay encounters CRC errors, deserialization failures, or truncated entries. |
+| `--shutdown-timeout` | | `30` | Graceful shutdown timeout in seconds. |
 | `--tls-cert` | | | Path to TLS certificate PEM file (requires `--tls-key`) |
 | `--tls-key` | | | Path to TLS private key PEM file (requires `--tls-cert`) |
 | `--node-id` | | | Raft cluster node ID (omit for standalone mode) |
@@ -484,6 +487,8 @@ RUST_LOG=vectors_db=info \
   --data-dir /var/lib/vectors-db \
   --max-memory-mb 4096 \
   --snapshot-interval 600 \
+  --auto-compact-ratio 0.2 \
+  --wal-strict \
   --tls-cert /etc/ssl/cert.pem \
   --tls-key /etc/ssl/key.pem
 ```
@@ -758,7 +763,7 @@ Saves all collections to disk, then truncates the WAL. The WAL is frozen during 
 
 #### `POST /admin/rebuild/:name`
 
-Rebuilds the HNSW and BM25 indices from live documents. Reclaims soft-deleted nodes and compacts internal ID space. Returns timing information:
+Rebuilds the HNSW and BM25 indices from live documents. Reclaims soft-deleted nodes and compacts internal ID space. This is also triggered automatically by auto-compaction when `--auto-compact-ratio` is set (default 0.2). Returns timing information:
 
 ```json
 {
@@ -1035,6 +1040,38 @@ On startup:
 2. Open the WAL and validate entries (CRC32 checks)
 3. Replay valid WAL entries on top of snapshot state (idempotent)
 4. Server is ready
+
+WAL replay is implemented in the core library (`Database::replay_wal`), making it available to both the REST server and embedded consumers (PyO3, direct Rust usage). Each WAL entry is applied idempotently — duplicates and entries referencing missing collections are silently skipped.
+
+Use `--wal-strict` to fail startup if the WAL contains CRC errors, deserialization failures, or truncated entries. Without this flag, corrupted entries are logged as warnings and skipped.
+
+### Auto-compaction
+
+When documents are deleted, HNSW nodes are soft-deleted (marked but not removed). Over time, this wastes memory and degrades graph quality. Auto-compaction automatically rebuilds indices when the deletion ratio exceeds a configurable threshold.
+
+**Configuration:**
+
+```bash
+# Rebuild when >20% of nodes are deleted (default)
+./vectors-db --auto-compact-ratio 0.2
+
+# Rebuild when >10% are deleted (more aggressive)
+./vectors-db --auto-compact-ratio 0.1
+
+# Disable auto-compaction
+./vectors-db --auto-compact-ratio 0.0
+```
+
+**How it works:**
+
+1. After each periodic snapshot (controlled by `--snapshot-interval`), the server checks each collection's deletion ratio
+2. If any collection's ratio exceeds `--auto-compact-ratio`, a three-phase rebuild is triggered:
+   - **Phase A** (read lock): Snapshot all live documents with their vectors
+   - **Phase B** (no lock): Build new HNSW + BM25 indices from scratch
+   - **Phase C** (write lock, brief): Swap in the new indices and catch up with concurrent inserts
+3. The compacted collection is saved to disk after rebuild
+
+Auto-compaction runs in the background snapshot task and does not block search queries (Phase B runs without any lock). Manual compaction is also available via `POST /admin/rebuild/:name`.
 
 ### Graceful shutdown
 
@@ -1616,6 +1653,8 @@ Compact mode uses u8 quantized vectors with asymmetric f32-vs-u8 distance for al
 | Port | 3030 |
 | Data directory | `./data` |
 | Snapshot interval | 300 seconds |
+| Auto-compact ratio | 0.2 (rebuild when >20% deleted) |
+| Shutdown timeout | 30 seconds |
 | Request timeout | 30 seconds |
 | Global rate limit | 100 req/s |
 | Max concurrent requests | 512 |

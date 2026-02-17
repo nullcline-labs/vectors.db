@@ -15,6 +15,7 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 - **Hybrid search** combining vector + keyword via RRF or linear fusion
 - **Scalar quantization** (f32 -> u8) for memory-efficient SIMD-friendly storage, with optional raw f32 vectors for maximum recall
 - **Write-Ahead Log (WAL)** with CRC32 checksums and fsync for crash recovery
+- **Auto-compaction** — automatic index rebuild when deleted nodes exceed a configurable threshold (default 20%)
 - **Bearer token authentication** via `VECTORS_DB_API_KEY`
 - **Prometheus metrics** at `/metrics`
 - **Request timeout** (30s) and **rate limiting** (100 req/s)
@@ -172,6 +173,9 @@ POST /collections/:name/search
 |----------|---------|-------------|
 | `--port`, `-p` | 3030 | Port to listen on |
 | `--data-dir`, `-d` | `./data` | Directory for WAL and snapshots |
+| `--snapshot-interval` | 300 | Auto-snapshot interval in seconds (0 = disabled) |
+| `--auto-compact-ratio` | 0.2 | Rebuild indices when >N% of nodes are deleted (0.0 = disabled) |
+| `--wal-strict` | false | Fail startup if WAL replay encounters errors |
 
 ## Architecture
 

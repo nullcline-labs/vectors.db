@@ -280,4 +280,184 @@ mod tests {
         };
         assert!(matches_filter(&metadata, &filter));
     }
+
+    // ── None value branches (all operators) ──────────────────────────
+
+    fn none_cond(field: &str, op: FilterOperator) -> FilterCondition {
+        FilterCondition {
+            field: field.to_string(),
+            op,
+            value: None,
+            values: None,
+        }
+    }
+
+    #[test]
+    fn test_eq_none_value_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(1))]);
+        let filter = FilterClause {
+            must: vec![none_cond("x", FilterOperator::Eq)],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_ne_none_value_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(1))]);
+        let filter = FilterClause {
+            must: vec![none_cond("x", FilterOperator::Ne)],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_gt_none_value_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(1))]);
+        let filter = FilterClause {
+            must: vec![none_cond("x", FilterOperator::Gt)],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_lt_none_value_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(1))]);
+        let filter = FilterClause {
+            must: vec![none_cond("x", FilterOperator::Lt)],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_gte_none_value_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(1))]);
+        let filter = FilterClause {
+            must: vec![none_cond("x", FilterOperator::Gte)],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_lte_none_value_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(1))]);
+        let filter = FilterClause {
+            must: vec![none_cond("x", FilterOperator::Lte)],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_in_none_values_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::String("a".into()))]);
+        let filter = FilterClause {
+            must: vec![none_cond("x", FilterOperator::In)],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    // ── Type mismatch in json_eq ─────────────────────────────────────
+
+    #[test]
+    fn test_eq_string_vs_number_mismatch() {
+        let metadata = meta(vec![("x", MetadataValue::String("hello".into()))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Eq, json!(42))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_eq_bool_vs_string_mismatch() {
+        let metadata = meta(vec![("x", MetadataValue::Boolean(true))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Eq, json!("true"))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_eq_integer_vs_string_mismatch() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(42))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Eq, json!("42"))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_eq_float_vs_string_mismatch() {
+        let metadata = meta(vec![("x", MetadataValue::Float(3.14))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Eq, json!("3.14"))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    // ── Non-numeric comparison (json_cmp returns None) ───────────────
+
+    #[test]
+    fn test_gt_with_string_metadata_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::String("hello".into()))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Gt, json!(10))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_lt_with_bool_metadata_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Boolean(true))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Lt, json!(10))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
+
+    // ── Float equality ───────────────────────────────────────────────
+
+    #[test]
+    fn test_eq_float_metadata_with_number() {
+        let metadata = meta(vec![("score", MetadataValue::Float(0.5))]);
+        let filter = FilterClause {
+            must: vec![cond("score", FilterOperator::Eq, json!(0.5))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    #[test]
+    fn test_eq_integer_with_float_json() {
+        // Integer(10) == json!(10.0) via f64 comparison
+        let metadata = meta(vec![("x", MetadataValue::Integer(10))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Eq, json!(10.0))],
+            must_not: vec![],
+        };
+        assert!(matches_filter(&metadata, &filter));
+    }
+
+    // ── Comparison with non-numeric JSON value ───────────────────────
+
+    #[test]
+    fn test_gt_integer_vs_string_json_returns_false() {
+        let metadata = meta(vec![("x", MetadataValue::Integer(10))]);
+        let filter = FilterClause {
+            must: vec![cond("x", FilterOperator::Gt, json!("5"))],
+            must_not: vec![],
+        };
+        assert!(!matches_filter(&metadata, &filter));
+    }
 }

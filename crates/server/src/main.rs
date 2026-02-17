@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
 use vectorsdb_core::config;
-use vectorsdb_core::storage::{load_all_collections, save_collection, Database, WalEntry};
+use vectorsdb_core::storage::{load_all_collections, save_collection, Database};
 use vectorsdb_server::api::create_router;
 use vectorsdb_server::api::handlers::AppState;
 use vectorsdb_server::api::metrics;
@@ -51,6 +51,10 @@ struct Args {
     /// Fail startup if WAL replay encounters errors (strict mode)
     #[arg(long, default_value_t = false)]
     wal_strict: bool,
+
+    /// Auto-compaction threshold (0.0 = disabled, default 0.2 = rebuild when >20% deleted)
+    #[arg(long, default_value_t = config::DEFAULT_AUTO_COMPACT_RATIO)]
+    auto_compact_ratio: f32,
 
     /// Comma-separated peer addresses (id=addr format, e.g. "2=host2:3030,3=host3:3030")
     #[arg(long)]
@@ -140,10 +144,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if !entries.is_empty() {
                 tracing::info!("Replaying {} WAL entries", entries.len());
-                for entry in entries {
-                    apply_wal_entry(&db, &entry);
-                }
-                tracing::info!("WAL replay complete");
+                let applied = db.replay_wal(&entries);
+                tracing::info!(
+                    "WAL replay complete: {applied}/{} entries applied",
+                    entries.len()
+                );
             }
         }
         Err(e) => {
@@ -278,12 +283,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Spawn auto-snapshot background task
+    let auto_compact_ratio = args.auto_compact_ratio;
     if args.snapshot_interval > 0 {
         let snap_db = db.clone();
         let snap_wal = wal.clone();
         let snap_data_dir = args.data_dir.clone();
         let snap_interval = args.snapshot_interval;
         tracing::info!("Auto-snapshots enabled every {}s", snap_interval);
+        if auto_compact_ratio > 0.0 {
+            tracing::info!(
+                "Auto-compaction enabled (threshold: {:.0}% deleted)",
+                auto_compact_ratio * 100.0
+            );
+        }
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(snap_interval));
             interval.tick().await;
@@ -305,6 +317,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tracing::error!("WAL truncate after snapshot failed: {}", e);
                     } else {
                         tracing::info!("Periodic snapshot complete, WAL truncated");
+                    }
+                }
+
+                // Auto-compaction: rebuild indices when deletion ratio exceeds threshold
+                if auto_compact_ratio > 0.0 {
+                    let collections = snap_db.collections.read();
+                    let candidates: Vec<(String, f32)> = collections
+                        .iter()
+                        .filter_map(|(name, col)| {
+                            let ratio = col.deletion_ratio();
+                            if ratio > auto_compact_ratio {
+                                Some((name.clone(), ratio))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    drop(collections);
+
+                    for (name, ratio) in candidates {
+                        tracing::info!(
+                            "Auto-compaction: '{}' has {:.1}% deleted, rebuilding",
+                            name,
+                            ratio * 100.0
+                        );
+                        if let Some(col) = snap_db.get_collection(&name) {
+                            let count = col.rebuild_indices();
+                            tracing::info!(
+                                "Auto-compaction: '{}' rebuilt with {} live docs",
+                                name,
+                                count
+                            );
+                            if let Err(e) = save_collection(&col, &snap_data_dir) {
+                                tracing::error!(
+                                    "Auto-compaction: failed to save '{}': {}",
+                                    name,
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -359,129 +411,6 @@ fn parse_rbac_config() -> Option<RbacConfig> {
         }
     }
     None
-}
-
-fn apply_wal_entry(db: &Database, entry: &WalEntry) {
-    match entry {
-        WalEntry::CreateCollection {
-            name,
-            dimension,
-            config,
-        } => match db.create_collection(name.clone(), *dimension, Some(config.clone())) {
-            Ok(()) => tracing::info!("WAL replay: created collection '{}'", name),
-            Err(_) => tracing::debug!("WAL replay: collection '{}' already exists, skipping", name),
-        },
-        WalEntry::DeleteCollection { name } => {
-            if db.delete_collection(name) {
-                tracing::info!("WAL replay: deleted collection '{}'", name);
-            } else {
-                tracing::debug!(
-                    "WAL replay: collection '{}' not found, skipping delete",
-                    name
-                );
-            }
-        }
-        WalEntry::InsertDocument {
-            collection_name,
-            document,
-            embedding,
-        } => {
-            if let Some(collection) = db.get_collection(collection_name) {
-                if collection.get_document(&document.id).is_some() {
-                    tracing::debug!(
-                        "WAL replay: document '{}' already exists, skipping",
-                        document.id
-                    );
-                    return;
-                }
-                collection.insert_document(document.clone(), embedding.clone());
-                tracing::info!(
-                    "WAL replay: inserted document '{}' into '{}'",
-                    document.id,
-                    collection_name
-                );
-            } else {
-                tracing::warn!(
-                    "WAL replay: collection '{}' not found for insert, skipping",
-                    collection_name
-                );
-            }
-        }
-        WalEntry::DeleteDocument {
-            collection_name,
-            document_id,
-        } => {
-            if let Some(collection) = db.get_collection(collection_name) {
-                if collection.delete_document(document_id) {
-                    tracing::info!(
-                        "WAL replay: deleted document '{}' from '{}'",
-                        document_id,
-                        collection_name
-                    );
-                } else {
-                    tracing::debug!(
-                        "WAL replay: document '{}' not found, skipping delete",
-                        document_id
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    "WAL replay: collection '{}' not found for delete, skipping",
-                    collection_name
-                );
-            }
-        }
-        WalEntry::InsertDocumentBatch {
-            collection_name,
-            documents,
-        } => {
-            if let Some(collection) = db.get_collection(collection_name) {
-                let mut inserted = 0;
-                for (document, embedding) in documents {
-                    if collection.get_document(&document.id).is_some() {
-                        tracing::debug!(
-                            "WAL replay: document '{}' already exists, skipping",
-                            document.id
-                        );
-                        continue;
-                    }
-                    collection.insert_document(document.clone(), embedding.clone());
-                    inserted += 1;
-                }
-                tracing::info!(
-                    "WAL replay: batch inserted {} documents into '{}'",
-                    inserted,
-                    collection_name
-                );
-            } else {
-                tracing::warn!(
-                    "WAL replay: collection '{}' not found for batch insert, skipping",
-                    collection_name
-                );
-            }
-        }
-        WalEntry::UpdateDocument {
-            collection_name,
-            document_id,
-            document,
-            embedding,
-        } => {
-            if let Some(collection) = db.get_collection(collection_name) {
-                collection.delete_document(document_id);
-                collection.insert_document(document.clone(), embedding.clone());
-                tracing::info!(
-                    "WAL replay: updated document '{}' in '{}'",
-                    document_id,
-                    collection_name
-                );
-            } else {
-                tracing::warn!(
-                    "WAL replay: collection '{}' not found for update, skipping",
-                    collection_name
-                );
-            }
-        }
-    }
 }
 
 async fn wait_for_signal() {

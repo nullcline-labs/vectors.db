@@ -13,6 +13,7 @@ use crate::quantization::QuantizedVector;
 use crate::search::filter::matches_filter;
 use crate::search::hybrid::{linear_fusion, rrf_fusion};
 use crate::search::ScoredDocument;
+use crate::storage::wal::WalEntry;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -464,6 +465,19 @@ impl Collection {
         data.hnsw_index.deleted.iter().filter(|&&d| d).count()
     }
 
+    /// Returns the ratio of soft-deleted nodes to total nodes in the HNSW index.
+    ///
+    /// Returns 0.0 if the index is empty. Used by auto-compaction to decide
+    /// when to trigger `rebuild_indices`.
+    pub fn deletion_ratio(&self) -> f32 {
+        let data = self.data.read();
+        let total = data.hnsw_index.node_count as usize;
+        if total == 0 {
+            return 0.0;
+        }
+        data.hnsw_index.deleted.iter().filter(|&&d| d).count() as f32 / total as f32
+    }
+
     /// Estimates the total memory usage of this collection in bytes.
     pub fn estimate_memory_bytes(&self) -> usize {
         let data = self.data.read();
@@ -657,6 +671,95 @@ impl Database {
             .values()
             .map(|c| c.estimate_memory_bytes())
             .sum()
+    }
+
+    /// Apply a single WAL entry to the database. Idempotent — safe to replay.
+    ///
+    /// Returns `true` if the entry was applied, `false` if it was a no-op
+    /// (e.g., collection already exists, document already present).
+    pub fn apply_wal_entry(&self, entry: &WalEntry) -> bool {
+        match entry {
+            WalEntry::CreateCollection {
+                name,
+                dimension,
+                config,
+            } => self
+                .create_collection(name.clone(), *dimension, Some(config.clone()))
+                .is_ok(),
+
+            WalEntry::DeleteCollection { name } => self.delete_collection(name),
+
+            WalEntry::InsertDocument {
+                collection_name,
+                document,
+                embedding,
+            } => {
+                if let Some(collection) = self.get_collection(collection_name) {
+                    if collection.get_document(&document.id).is_some() {
+                        return false; // already exists
+                    }
+                    collection.insert_document(document.clone(), embedding.clone());
+                    true
+                } else {
+                    false
+                }
+            }
+
+            WalEntry::DeleteDocument {
+                collection_name,
+                document_id,
+            } => {
+                if let Some(collection) = self.get_collection(collection_name) {
+                    collection.delete_document(document_id)
+                } else {
+                    false
+                }
+            }
+
+            WalEntry::InsertDocumentBatch {
+                collection_name,
+                documents,
+            } => {
+                if let Some(collection) = self.get_collection(collection_name) {
+                    let mut any = false;
+                    for (document, embedding) in documents {
+                        if collection.get_document(&document.id).is_some() {
+                            continue;
+                        }
+                        collection.insert_document(document.clone(), embedding.clone());
+                        any = true;
+                    }
+                    any
+                } else {
+                    false
+                }
+            }
+
+            WalEntry::UpdateDocument {
+                collection_name,
+                document_id,
+                document,
+                embedding,
+            } => {
+                if let Some(collection) = self.get_collection(collection_name) {
+                    collection.delete_document(document_id);
+                    collection.insert_document(document.clone(), embedding.clone());
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Replay a sequence of WAL entries. Returns the number of entries applied.
+    ///
+    /// Entries that are no-ops (duplicates, missing collections) are silently skipped.
+    pub fn replay_wal(&self, entries: &[WalEntry]) -> usize {
+        entries
+            .iter()
+            .filter(|entry| self.apply_wal_entry(entry))
+            .count()
     }
 }
 
@@ -1083,5 +1186,642 @@ mod tests {
         col.insert_document(make_doc("hi", HashMap::new()), vec![1.0, 0.0, 0.0, 0.0]);
         let mem = db.total_memory_bytes();
         assert!(mem > 0);
+    }
+
+    // ── WAL replay ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_replay_wal_create_collection() {
+        let db = Database::new();
+        let entry = WalEntry::CreateCollection {
+            name: "test".into(),
+            dimension: 4,
+            config: HnswConfig::default(),
+        };
+        assert!(db.apply_wal_entry(&entry));
+        assert!(db.get_collection("test").is_some());
+    }
+
+    #[test]
+    fn test_replay_wal_idempotent() {
+        let db = Database::new();
+        let entry = WalEntry::CreateCollection {
+            name: "idem".into(),
+            dimension: 4,
+            config: HnswConfig::default(),
+        };
+        assert!(db.apply_wal_entry(&entry));
+        // Second time is a no-op
+        assert!(!db.apply_wal_entry(&entry));
+    }
+
+    #[test]
+    fn test_replay_wal_insert_and_delete() {
+        let db = Database::new();
+        db.create_collection("col".into(), 4, None).unwrap();
+        let doc = Document::new("hello".into(), HashMap::new());
+        let doc_id = doc.id;
+
+        let insert_entry = WalEntry::InsertDocument {
+            collection_name: "col".into(),
+            document: doc,
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        assert!(db.apply_wal_entry(&insert_entry));
+        assert_eq!(db.get_collection("col").unwrap().document_count(), 1);
+
+        let delete_entry = WalEntry::DeleteDocument {
+            collection_name: "col".into(),
+            document_id: doc_id,
+        };
+        assert!(db.apply_wal_entry(&delete_entry));
+        assert_eq!(db.get_collection("col").unwrap().document_count(), 0);
+    }
+
+    #[test]
+    fn test_replay_wal_batch_insert() {
+        let db = Database::new();
+        db.create_collection("batch".into(), 4, None).unwrap();
+
+        let docs = vec![
+            (
+                Document::new("a".into(), HashMap::new()),
+                vec![1.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                Document::new("b".into(), HashMap::new()),
+                vec![0.0, 1.0, 0.0, 0.0],
+            ),
+        ];
+        let entry = WalEntry::InsertDocumentBatch {
+            collection_name: "batch".into(),
+            documents: docs,
+        };
+        assert!(db.apply_wal_entry(&entry));
+        assert_eq!(db.get_collection("batch").unwrap().document_count(), 2);
+    }
+
+    #[test]
+    fn test_replay_wal_update() {
+        let db = Database::new();
+        db.create_collection("upd".into(), 4, None).unwrap();
+
+        let doc = Document::new("original".into(), HashMap::new());
+        let doc_id = doc.id;
+        db.apply_wal_entry(&WalEntry::InsertDocument {
+            collection_name: "upd".into(),
+            document: doc,
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        });
+
+        let updated_doc = Document::with_id(doc_id, "updated".into(), HashMap::new());
+        db.apply_wal_entry(&WalEntry::UpdateDocument {
+            collection_name: "upd".into(),
+            document_id: doc_id,
+            document: updated_doc,
+            embedding: vec![0.0, 1.0, 0.0, 0.0],
+        });
+
+        let col = db.get_collection("upd").unwrap();
+        assert_eq!(col.document_count(), 1);
+        let fetched = col.get_document(&doc_id).unwrap();
+        assert_eq!(fetched.text, "updated");
+    }
+
+    #[test]
+    fn test_replay_wal_returns_applied_count() {
+        let db = Database::new();
+        let entries = vec![
+            WalEntry::CreateCollection {
+                name: "c".into(),
+                dimension: 4,
+                config: HnswConfig::default(),
+            },
+            WalEntry::CreateCollection {
+                name: "c".into(),
+                dimension: 4,
+                config: HnswConfig::default(),
+            }, // duplicate — not applied
+            WalEntry::DeleteCollection {
+                name: "nonexistent".into(),
+            }, // not applied
+        ];
+        let applied = db.replay_wal(&entries);
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn test_replay_wal_missing_collection_skipped() {
+        let db = Database::new();
+        let doc = Document::new("orphan".into(), HashMap::new());
+        let entry = WalEntry::InsertDocument {
+            collection_name: "nonexistent".into(),
+            document: doc,
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        assert!(!db.apply_wal_entry(&entry));
+    }
+
+    // ── Deletion ratio ────────────────────────────────────────────────
+
+    #[test]
+    fn test_deletion_ratio_empty() {
+        let col = Collection::new("dr".to_string(), 4, make_config());
+        assert_eq!(col.deletion_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_deletion_ratio_after_deletes() {
+        let col = Collection::new("dr".to_string(), 4, make_config());
+        let doc1 = make_doc("a", HashMap::new());
+        let doc2 = make_doc("b", HashMap::new());
+        let id1 = doc1.id;
+        col.insert_document(doc1, vec![1.0, 0.0, 0.0, 0.0]);
+        col.insert_document(doc2, vec![0.0, 1.0, 0.0, 0.0]);
+        col.delete_document(&id1);
+        let ratio = col.deletion_ratio();
+        assert!((ratio - 0.5).abs() < 0.01, "expected ~0.5, got {}", ratio);
+    }
+
+    #[test]
+    fn test_deletion_ratio_after_rebuild() {
+        let col = Collection::new("dr".to_string(), 4, make_config());
+        let doc1 = make_doc("keep", HashMap::new());
+        let doc2 = make_doc("del", HashMap::new());
+        let id2 = doc2.id;
+        col.insert_document(doc1, vec![1.0, 0.0, 0.0, 0.0]);
+        col.insert_document(doc2, vec![0.0, 1.0, 0.0, 0.0]);
+        col.delete_document(&id2);
+        assert!(col.deletion_ratio() > 0.0);
+        col.rebuild_indices();
+        assert_eq!(col.deletion_ratio(), 0.0);
+    }
+
+    // ── CollectionData::validate error branches ──────────────────────
+
+    #[test]
+    fn test_validate_vector_data_length_mismatch() {
+        let mut cd = CollectionData::new("t".into(), 4, HnswConfig::default());
+        // Insert one node worth of data but corrupt vector_data length
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 3]; // should be 4
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![vec![]];
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![false];
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 0);
+        cd.internal_to_uuid.push(Uuid::new_v4());
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("vector_data length"));
+    }
+
+    #[test]
+    fn test_validate_vector_min_length_mismatch() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![]; // should be 1
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![vec![]];
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![false];
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 0);
+        cd.internal_to_uuid.push(Uuid::new_v4());
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("vector_min length"));
+    }
+
+    #[test]
+    fn test_validate_vector_scale_length_mismatch() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![]; // should be 1
+        cd.hnsw_index.neighbors = vec![vec![]];
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![false];
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 0);
+        cd.internal_to_uuid.push(Uuid::new_v4());
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("vector_scale length"));
+    }
+
+    #[test]
+    fn test_validate_neighbors_length_mismatch() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![]; // should be 1
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![false];
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 0);
+        cd.internal_to_uuid.push(Uuid::new_v4());
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("neighbors length"));
+    }
+
+    #[test]
+    fn test_validate_layers_length_mismatch() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![vec![]];
+        cd.hnsw_index.layers = vec![]; // should be 1
+        cd.hnsw_index.deleted = vec![false];
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 0);
+        cd.internal_to_uuid.push(Uuid::new_v4());
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("layers length"));
+    }
+
+    #[test]
+    fn test_validate_deleted_length_mismatch() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![vec![]];
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![]; // should be 1
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 0);
+        cd.internal_to_uuid.push(Uuid::new_v4());
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("deleted length"));
+    }
+
+    #[test]
+    fn test_validate_uuid_mapping_asymmetry() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![vec![]];
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![false];
+        // uuid_to_internal has 2, internal_to_uuid has 1
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 0);
+        cd.uuid_to_internal.insert(Uuid::new_v4(), 1);
+        cd.internal_to_uuid.push(Uuid::new_v4());
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("uuid_to_internal"));
+    }
+
+    #[test]
+    fn test_validate_internal_to_uuid_vs_node_count() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 2;
+        cd.hnsw_index.vector_data = vec![0u8; 4];
+        cd.hnsw_index.vector_min = vec![0.0, 0.0];
+        cd.hnsw_index.vector_scale = vec![1.0, 1.0];
+        cd.hnsw_index.neighbors = vec![vec![], vec![]];
+        cd.hnsw_index.layers = vec![0, 0];
+        cd.hnsw_index.deleted = vec![false, false];
+        // Only 1 mapping but node_count = 2
+        let uid = Uuid::new_v4();
+        cd.uuid_to_internal.insert(uid, 0);
+        cd.internal_to_uuid.push(uid);
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("internal_to_uuid length"));
+    }
+
+    #[test]
+    fn test_validate_documents_exceed_node_count() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        // 0 nodes but 1 document
+        cd.documents
+            .insert(Uuid::new_v4(), Arc::new(make_doc("x", HashMap::new())));
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("documents"));
+    }
+
+    #[test]
+    fn test_validate_entry_point_out_of_bounds() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![vec![]];
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![false];
+        cd.hnsw_index.entry_point = Some(5); // out of bounds
+        let uid = Uuid::new_v4();
+        cd.uuid_to_internal.insert(uid, 0);
+        cd.internal_to_uuid.push(uid);
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("entry_point"));
+    }
+
+    #[test]
+    fn test_validate_neighbor_out_of_bounds() {
+        let mut cd = CollectionData::new("t".into(), 2, HnswConfig::default());
+        cd.hnsw_index.node_count = 1;
+        cd.hnsw_index.vector_data = vec![0u8; 2];
+        cd.hnsw_index.vector_min = vec![0.0];
+        cd.hnsw_index.vector_scale = vec![1.0];
+        cd.hnsw_index.neighbors = vec![vec![vec![99]]]; // neighbor 99 out of bounds
+        cd.hnsw_index.layers = vec![0];
+        cd.hnsw_index.deleted = vec![false];
+        let uid = Uuid::new_v4();
+        cd.uuid_to_internal.insert(uid, 0);
+        cd.internal_to_uuid.push(uid);
+        let err = cd.validate().unwrap_err();
+        assert!(err.contains("neighbor"));
+    }
+
+    // ── Hybrid search filtered: additional branches ──────────────────
+
+    #[test]
+    fn test_hybrid_search_filtered_linear() {
+        let col = Collection::new("hfl".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc(
+                "alpha content",
+                meta_kv("tag", MetadataValue::String("yes".into())),
+            ),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc(
+                "beta content",
+                meta_kv("tag", MetadataValue::String("no".into())),
+            ),
+            vec![0.9, 0.1, 0.0, 0.0],
+        );
+
+        let filter = FilterClause {
+            must: vec![FilterCondition {
+                field: "tag".to_string(),
+                op: FilterOperator::Eq,
+                value: Some(serde_json::Value::String("yes".into())),
+                values: None,
+            }],
+            must_not: vec![],
+        };
+
+        let results = col.hybrid_search_filtered(
+            Some("alpha content"),
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            5,
+            0.5,
+            "linear",
+            None,
+            &filter,
+        );
+        for r in &results {
+            match r.document.metadata.get("tag") {
+                Some(MetadataValue::String(s)) => assert_eq!(s, "yes"),
+                other => panic!("expected yes, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_hybrid_search_filtered_keyword_only() {
+        let col = Collection::new("hfk".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("hello world", meta_kv("ok", MetadataValue::Boolean(true))),
+            make_embedding(4, 0),
+        );
+        col.insert_document(
+            make_doc(
+                "hello world again",
+                meta_kv("ok", MetadataValue::Boolean(false)),
+            ),
+            make_embedding(4, 1),
+        );
+
+        let filter = FilterClause {
+            must: vec![FilterCondition {
+                field: "ok".to_string(),
+                op: FilterOperator::Eq,
+                value: Some(serde_json::json!(true)),
+                values: None,
+            }],
+            must_not: vec![],
+        };
+
+        let results =
+            col.hybrid_search_filtered(Some("hello world"), None, 5, 0.0, "rrf", None, &filter);
+        for r in &results {
+            match r.document.metadata.get("ok") {
+                Some(MetadataValue::Boolean(b)) => assert!(b),
+                other => panic!("expected Boolean(true), got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_hybrid_search_filtered_vector_only() {
+        let col = Collection::new("hfv".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("a", meta_kv("x", MetadataValue::Integer(1))),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        col.insert_document(
+            make_doc("b", meta_kv("x", MetadataValue::Integer(2))),
+            vec![0.9, 0.1, 0.0, 0.0],
+        );
+
+        let filter = FilterClause {
+            must: vec![FilterCondition {
+                field: "x".to_string(),
+                op: FilterOperator::Eq,
+                value: Some(serde_json::json!(1)),
+                values: None,
+            }],
+            must_not: vec![],
+        };
+
+        let results = col.hybrid_search_filtered(
+            None,
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            5,
+            1.0,
+            "rrf",
+            None,
+            &filter,
+        );
+        for r in &results {
+            match r.document.metadata.get("x") {
+                Some(MetadataValue::Integer(i)) => assert_eq!(*i, 1),
+                other => panic!("expected Integer(1), got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_hybrid_search_filtered_min_similarity() {
+        let col = Collection::new("hfm".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("a", meta_kv("ok", MetadataValue::Boolean(true))),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+
+        let filter = FilterClause {
+            must: vec![],
+            must_not: vec![],
+        };
+
+        let results = col.hybrid_search_filtered(
+            Some("a"),
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            5,
+            0.5,
+            "rrf",
+            Some(999.0),
+            &filter,
+        );
+        assert!(
+            results.is_empty(),
+            "extreme min_similarity should filter all"
+        );
+    }
+
+    #[test]
+    fn test_vector_search_filtered_min_similarity() {
+        let col = Collection::new("vfm".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("a", meta_kv("ok", MetadataValue::Boolean(true))),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+
+        let filter = FilterClause {
+            must: vec![],
+            must_not: vec![],
+        };
+
+        let results = col.vector_search_filtered(&[1.0, 0.0, 0.0, 0.0], 5, Some(999.0), &filter);
+        assert!(
+            results.is_empty(),
+            "extreme min_similarity should filter all"
+        );
+    }
+
+    // ── estimate_memory_bytes with PQ ────────────────────────────────
+
+    #[test]
+    fn test_estimate_memory_bytes_with_documents() {
+        let col = Collection::new("mem2".to_string(), 4, make_config());
+        col.insert_document(
+            make_doc("doc1", meta_kv("k", MetadataValue::String("v".into()))),
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        col.insert_document(make_doc("doc2", HashMap::new()), vec![0.0, 1.0, 0.0, 0.0]);
+        let mem = col.estimate_memory_bytes();
+        assert!(mem > 100, "memory with 2 docs should be substantial");
+    }
+
+    // ── WAL replay edge cases ────────────────────────────────────────
+
+    #[test]
+    fn test_replay_wal_delete_missing_collection() {
+        let db = Database::new();
+        let entry = WalEntry::DeleteCollection {
+            name: "ghost".into(),
+        };
+        assert!(!db.apply_wal_entry(&entry));
+    }
+
+    #[test]
+    fn test_replay_wal_insert_duplicate_skipped() {
+        let db = Database::new();
+        db.create_collection("c".into(), 4, None).unwrap();
+        let doc = Document::new("dup".into(), HashMap::new());
+        let doc_clone = Document::with_id(doc.id, "dup".into(), HashMap::new());
+        let entry1 = WalEntry::InsertDocument {
+            collection_name: "c".into(),
+            document: doc,
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let entry2 = WalEntry::InsertDocument {
+            collection_name: "c".into(),
+            document: doc_clone,
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        assert!(db.apply_wal_entry(&entry1));
+        assert!(!db.apply_wal_entry(&entry2)); // duplicate
+        assert_eq!(db.get_collection("c").unwrap().document_count(), 1);
+    }
+
+    #[test]
+    fn test_replay_wal_delete_document_missing_collection() {
+        let db = Database::new();
+        let entry = WalEntry::DeleteDocument {
+            collection_name: "nope".into(),
+            document_id: Uuid::new_v4(),
+        };
+        assert!(!db.apply_wal_entry(&entry));
+    }
+
+    #[test]
+    fn test_replay_wal_delete_document_missing_doc() {
+        let db = Database::new();
+        db.create_collection("c".into(), 4, None).unwrap();
+        let entry = WalEntry::DeleteDocument {
+            collection_name: "c".into(),
+            document_id: Uuid::new_v4(),
+        };
+        assert!(!db.apply_wal_entry(&entry));
+    }
+
+    #[test]
+    fn test_replay_wal_batch_insert_missing_collection() {
+        let db = Database::new();
+        let entry = WalEntry::InsertDocumentBatch {
+            collection_name: "nope".into(),
+            documents: vec![(
+                Document::new("x".into(), HashMap::new()),
+                vec![1.0, 0.0, 0.0, 0.0],
+            )],
+        };
+        assert!(!db.apply_wal_entry(&entry));
+    }
+
+    #[test]
+    fn test_replay_wal_batch_insert_partial_duplicates() {
+        let db = Database::new();
+        db.create_collection("c".into(), 4, None).unwrap();
+        let doc1 = Document::new("a".into(), HashMap::new());
+        let doc1_dup = Document::with_id(doc1.id, "a".into(), HashMap::new());
+        let doc2 = Document::new("b".into(), HashMap::new());
+
+        // Pre-insert doc1
+        db.apply_wal_entry(&WalEntry::InsertDocument {
+            collection_name: "c".into(),
+            document: doc1,
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        });
+
+        // Batch: doc1 (dup) + doc2 (new)
+        let entry = WalEntry::InsertDocumentBatch {
+            collection_name: "c".into(),
+            documents: vec![
+                (doc1_dup, vec![1.0, 0.0, 0.0, 0.0]),
+                (doc2, vec![0.0, 1.0, 0.0, 0.0]),
+            ],
+        };
+        assert!(db.apply_wal_entry(&entry));
+        assert_eq!(db.get_collection("c").unwrap().document_count(), 2);
+    }
+
+    #[test]
+    fn test_replay_wal_update_missing_collection() {
+        let db = Database::new();
+        let entry = WalEntry::UpdateDocument {
+            collection_name: "nope".into(),
+            document_id: Uuid::new_v4(),
+            document: Document::new("x".into(), HashMap::new()),
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        assert!(!db.apply_wal_entry(&entry));
     }
 }
