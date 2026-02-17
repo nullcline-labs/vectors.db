@@ -300,10 +300,7 @@ impl VectorDB {
                     }
                 }
                 Err(e) => {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "WAL replay failed: {}",
-                        e
-                    )));
+                    return Err(PyRuntimeError::new_err(format!("WAL replay failed: {}", e)));
                 }
             }
 
@@ -688,8 +685,7 @@ impl VectorDB {
         // If WAL is active, freeze writes during snapshot
         let _gate = self.wal.as_ref().map(|w| w.freeze());
 
-        save_collection(&col, &dir, enc_ref)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        save_collection(&col, &dir, enc_ref).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         // Truncate WAL after successful snapshot
         if let Some(ref wal) = self.wal {
@@ -745,9 +741,10 @@ impl VectorDB {
     /// This is the recommended way to create a consistent checkpoint. After compact,
     /// the WAL is empty and all data is in snapshots. Requires data_dir to be set.
     fn compact(&self) -> PyResult<()> {
-        let dir = self.data_dir.as_ref().ok_or_else(|| {
-            PyValueError::new_err("compact requires data_dir to be set")
-        })?;
+        let dir = self
+            .data_dir
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("compact requires data_dir to be set"))?;
 
         let enc_ref = self.encryption_key.as_deref();
         let _gate = self.wal.as_ref().map(|w| w.freeze());
@@ -755,8 +752,9 @@ impl VectorDB {
         let names = self.db.list_collections();
         for name in &names {
             if let Some(col) = self.db.get_collection(name) {
-                save_collection(&col, dir, enc_ref)
-                    .map_err(|e| PyRuntimeError::new_err(format!("save '{}' failed: {}", name, e)))?;
+                save_collection(&col, dir, enc_ref).map_err(|e| {
+                    PyRuntimeError::new_err(format!("save '{}' failed: {}", name, e))
+                })?;
             }
         }
 
