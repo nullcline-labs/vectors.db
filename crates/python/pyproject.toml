@@ -3,7 +3,7 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "vectorsdb"
+name = "vectors-db"
 version = "0.1.0"
 description = "In-memory vector database with HNSW, BM25, and hybrid search"
 requires-python = ">=3.9"
