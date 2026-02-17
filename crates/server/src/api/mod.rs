@@ -4,6 +4,8 @@
 //! and admin operations. Includes middleware for authentication, RBAC, rate limiting,
 //! request timeouts, body size limits, metrics collection, and request ID tracing.
 
+/// Structured audit logging for security-sensitive operations.
+pub mod audit;
 /// API error types mapped to HTTP status codes.
 pub mod errors;
 /// HTTP request handlers and application state.
@@ -38,9 +40,11 @@ use vectorsdb_core::config;
 
 async fn auth_middleware(
     State(state): State<AppState>,
-    req: axum::http::Request<axum::body::Body>,
+    mut req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
+    let client_ip = audit::extract_client_ip(&req);
+
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -66,6 +70,7 @@ async fn auth_middleware(
         }
 
         // Per-key rate limiting
+        let key_prefix = audit::mask_key(&token);
         if let Some(rps) = rbac.get_rate_limit(&token) {
             let mut limiters = state.key_rate_limiters.lock();
             let bucket = limiters
@@ -78,6 +83,11 @@ async fn auth_middleware(
             }
         }
 
+        req.extensions_mut().insert(audit::AuditContext {
+            key_prefix,
+            role: Some(role),
+            client_ip,
+        });
         return Ok(next.run(req).await);
     }
 
@@ -94,6 +104,23 @@ async fn auth_middleware(
                 "Invalid or missing API key".to_string(),
             ));
         }
+
+        let key_prefix = token
+            .as_deref()
+            .map(audit::mask_key)
+            .unwrap_or_else(|| "anonymous".to_string());
+        req.extensions_mut().insert(audit::AuditContext {
+            key_prefix,
+            role: None,
+            client_ip,
+        });
+    } else {
+        // No auth mode
+        req.extensions_mut().insert(audit::AuditContext {
+            key_prefix: "anonymous".to_string(),
+            role: None,
+            client_ip,
+        });
     }
     Ok(next.run(req).await)
 }

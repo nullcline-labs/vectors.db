@@ -1,5 +1,6 @@
 //! HTTP request handlers and shared application state.
 
+use crate::api::audit::{audit_event, AuditContext};
 use crate::api::errors::ApiError;
 use crate::api::metrics;
 use crate::api::models::*;
@@ -9,7 +10,7 @@ use crate::cluster::Raft;
 use crate::wal_async::WriteAheadLog;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 use metrics_exporter_prometheus::PrometheusHandle;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -185,6 +186,7 @@ fn disk_available_bytes(data_dir: &str) -> u64 {
 /// `POST /collections`
 pub async fn create_collection(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Json(req): Json<CreateCollectionRequest>,
 ) -> Result<Json<CreateCollectionResponse>, ApiError> {
     validate_collection_name(&req.name)?;
@@ -254,6 +256,15 @@ pub async fn create_collection(
     }
 
     metrics::record_write_operation(&req.name, "create");
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "create_collection",
+            &req.name,
+            &format!("dimension={}", req.dimension),
+            "success",
+        );
+    }
     tracing::info!(collection = %req.name, dimension = req.dimension, "Collection created");
     Ok(Json(CreateCollectionResponse {
         message: format!("Collection '{}' created", req.name),
@@ -285,6 +296,7 @@ pub async fn list_collections(State(state): State<AppState>) -> Json<Vec<Collect
 /// `DELETE /collections/:name`
 pub async fn delete_collection(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     let wal_entry = WalEntry::DeleteCollection { name: name.clone() };
@@ -293,6 +305,9 @@ pub async fn delete_collection(
     if state.raft.is_some() {
         raft_write_or_wal(&state, raft_entry, &wal_entry).await?;
         metrics::record_write_operation(&name, "drop");
+        if let Some(Extension(ref ctx)) = audit_ctx {
+            audit_event(ctx, "delete_collection", &name, "", "success");
+        }
         tracing::info!(collection = %name, "Collection deleted");
         Ok(Json(MessageResponse {
             message: format!("Collection '{}' deleted", name),
@@ -304,6 +319,9 @@ pub async fn delete_collection(
         })?;
         if state.db.delete_collection(&name) {
             metrics::record_write_operation(&name, "drop");
+            if let Some(Extension(ref ctx)) = audit_ctx {
+                audit_event(ctx, "delete_collection", &name, "", "success");
+            }
             tracing::info!(collection = %name, "Collection deleted");
             Ok(Json(MessageResponse {
                 message: format!("Collection '{}' deleted", name),
@@ -320,6 +338,7 @@ pub async fn delete_collection(
 /// `POST /collections/:name/documents`
 pub async fn insert_document(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
     Json(req): Json<InsertDocumentRequest>,
 ) -> Result<Json<InsertResponse>, ApiError> {
@@ -375,6 +394,15 @@ pub async fn insert_document(
     if state.raft.is_some() {
         raft_write_or_wal(&state, raft_entry, &wal_entry).await?;
         metrics::record_write_operation(&name, "insert");
+        if let Some(Extension(ref ctx)) = audit_ctx {
+            audit_event(
+                ctx,
+                "insert_document",
+                &name,
+                &format!("doc_id={}", doc.id),
+                "success",
+            );
+        }
         tracing::info!(collection = %name, doc_id = %doc.id, "Document inserted");
         Ok(Json(InsertResponse { id: doc.id }))
     } else {
@@ -384,6 +412,15 @@ pub async fn insert_document(
         })?;
         let id = collection.insert_document(doc, req.embedding);
         metrics::record_write_operation(&name, "insert");
+        if let Some(Extension(ref ctx)) = audit_ctx {
+            audit_event(
+                ctx,
+                "insert_document",
+                &name,
+                &format!("doc_id={}", id),
+                "success",
+            );
+        }
         tracing::info!(collection = %name, doc_id = %id, "Document inserted");
         Ok(Json(InsertResponse { id }))
     }
@@ -392,6 +429,7 @@ pub async fn insert_document(
 /// `POST /collections/:name/documents/batch`
 pub async fn batch_insert_documents(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
     Json(req): Json<BatchInsertRequest>,
 ) -> Result<Json<BatchInsertResponse>, ApiError> {
@@ -488,6 +526,15 @@ pub async fn batch_insert_documents(
         let inserted = ids.len();
         raft_write_or_wal(&state, raft_entry, &wal_entry).await?;
         metrics::record_write_operation(&name, "batch_insert");
+        if let Some(Extension(ref ctx)) = audit_ctx {
+            audit_event(
+                ctx,
+                "batch_insert",
+                &name,
+                &format!("count={}", inserted),
+                "success",
+            );
+        }
         tracing::info!(collection = %name, count = inserted, "Batch inserted");
         Ok(Json(BatchInsertResponse { ids, inserted }))
     } else {
@@ -501,6 +548,15 @@ pub async fn batch_insert_documents(
             .collect();
         let inserted = ids.len();
         metrics::record_write_operation(&name, "batch_insert");
+        if let Some(Extension(ref ctx)) = audit_ctx {
+            audit_event(
+                ctx,
+                "batch_insert",
+                &name,
+                &format!("count={}", inserted),
+                "success",
+            );
+        }
         tracing::info!(collection = %name, count = inserted, "Batch inserted");
         Ok(Json(BatchInsertResponse { ids, inserted }))
     }
@@ -531,6 +587,7 @@ pub async fn get_document(
 /// `DELETE /collections/:name/documents/:id`
 pub async fn delete_document(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path((name, id)): Path<(String, Uuid)>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     let collection = state
@@ -552,6 +609,15 @@ pub async fn delete_document(
     if state.raft.is_some() {
         raft_write_or_wal(&state, raft_entry, &wal_entry).await?;
         metrics::record_write_operation(&name, "delete");
+        if let Some(Extension(ref ctx)) = audit_ctx {
+            audit_event(
+                ctx,
+                "delete_document",
+                &name,
+                &format!("doc_id={}", id),
+                "success",
+            );
+        }
         tracing::info!(collection = %name, doc_id = %id, "Document deleted");
         Ok(Json(MessageResponse {
             message: format!("Document '{}' deleted", id),
@@ -563,6 +629,15 @@ pub async fn delete_document(
         })?;
         if collection.delete_document(&id) {
             metrics::record_write_operation(&name, "delete");
+            if let Some(Extension(ref ctx)) = audit_ctx {
+                audit_event(
+                    ctx,
+                    "delete_document",
+                    &name,
+                    &format!("doc_id={}", id),
+                    "success",
+                );
+            }
             tracing::info!(collection = %name, doc_id = %id, "Document deleted");
             Ok(Json(MessageResponse {
                 message: format!("Document '{}' deleted", id),
@@ -576,6 +651,7 @@ pub async fn delete_document(
 /// `PUT /collections/:name/documents/:id`
 pub async fn update_document(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path((name, id)): Path<(String, Uuid)>,
     Json(req): Json<UpdateDocumentRequest>,
 ) -> Result<Json<MessageResponse>, ApiError> {
@@ -663,6 +739,15 @@ pub async fn update_document(
     }
 
     metrics::record_write_operation(&name, "update");
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "update_document",
+            &name,
+            &format!("doc_id={}", id),
+            "success",
+        );
+    }
     tracing::info!(collection = %name, doc_id = %id, "Document updated");
     Ok(Json(MessageResponse {
         message: format!("Document '{}' updated", id),
@@ -672,6 +757,7 @@ pub async fn update_document(
 /// `POST /collections/:name/search`
 pub async fn search(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
@@ -785,6 +871,15 @@ pub async fn search(
         .collect();
 
     let count = paginated.len();
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "search",
+            &name,
+            &format!("mode={},k={},results={}", search_type, req.k, count),
+            "success",
+        );
+    }
     tracing::info!(collection = %name, k = req.k, mode = search_type, results = count, "Search completed");
     Ok(Json(SearchResponse {
         results: paginated,
@@ -796,6 +891,7 @@ pub async fn search(
 /// `POST /collections/:name/save`
 pub async fn save(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     let collection = state
@@ -813,6 +909,9 @@ pub async fn save(
         ApiError::Internal("Save operation failed".into())
     })?;
 
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(ctx, "save", &name, "", "success");
+    }
     Ok(Json(MessageResponse {
         message: format!("Collection '{}' saved", name),
     }))
@@ -821,6 +920,7 @@ pub async fn save(
 /// `POST /collections/:name/load`
 pub async fn load(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     let path = std::path::Path::new(&state.data_dir).join(format!("{}.vdb", name));
@@ -842,13 +942,19 @@ pub async fn load(
     let mut collections = state.db.collections.write();
     collections.insert(name.clone(), collection);
 
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(ctx, "load", &name, "", "success");
+    }
     Ok(Json(MessageResponse {
         message: format!("Collection '{}' loaded", name),
     }))
 }
 
 /// `POST /admin/compact`
-pub async fn compact(State(state): State<AppState>) -> Result<Json<MessageResponse>, ApiError> {
+pub async fn compact(
+    State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
+) -> Result<Json<MessageResponse>, ApiError> {
     let _gate = state.wal.freeze();
     let collections = state.db.collections.read();
     for (name, collection) in collections.iter() {
@@ -867,6 +973,15 @@ pub async fn compact(State(state): State<AppState>) -> Result<Json<MessageRespon
         ApiError::Internal("Compaction failed".into())
     })?;
 
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "compact",
+            "admin",
+            &format!("collections={}", count),
+            "success",
+        );
+    }
     Ok(Json(MessageResponse {
         message: format!("Compaction complete, {} collections saved", count),
     }))
@@ -1016,6 +1131,7 @@ pub async fn collection_stats(
 /// `POST /admin/rebuild/:name`
 pub async fn rebuild_index(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<RebuildResponse>, ApiError> {
     let collection = state
@@ -1027,6 +1143,15 @@ pub async fn rebuild_index(
     let document_count = collection.rebuild_indices();
     let elapsed_ms = start.elapsed().as_millis();
 
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "rebuild_index",
+            &name,
+            &format!("docs={},ms={}", document_count, elapsed_ms),
+            "success",
+        );
+    }
     Ok(Json(RebuildResponse {
         message: format!("Collection '{}' rebuilt", name),
         document_count,
@@ -1035,7 +1160,10 @@ pub async fn rebuild_index(
 }
 
 /// `POST /admin/backup`
-pub async fn backup(State(state): State<AppState>) -> Result<Json<BackupResponse>, ApiError> {
+pub async fn backup(
+    State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
+) -> Result<Json<BackupResponse>, ApiError> {
     let _gate = state.wal.freeze();
     let collections = state.db.collections.read();
     let mut files = Vec::new();
@@ -1047,6 +1175,15 @@ pub async fn backup(State(state): State<AppState>) -> Result<Json<BackupResponse
             },
         )?;
         files.push(format!("{}.vdb", name));
+    }
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "backup",
+            "admin",
+            &format!("collections={}", files.len()),
+            "success",
+        );
     }
     Ok(Json(BackupResponse {
         message: format!("Backed up {} collections", files.len()),
@@ -1069,6 +1206,7 @@ pub async fn routing_table(
 /// `POST /admin/assign`
 pub async fn assign_collection(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Json(req): Json<AssignCollectionRequest>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     let raft_entry = RaftLogEntry::AssignCollection {
@@ -1078,12 +1216,23 @@ pub async fn assign_collection(
 
     if let Some(ref raft) = state.raft {
         match raft.client_write(raft_entry).await {
-            Ok(_) => Ok(Json(MessageResponse {
-                message: format!(
-                    "Collection '{}' assigned to node {}",
-                    req.collection, req.node_id
-                ),
-            })),
+            Ok(_) => {
+                if let Some(Extension(ref ctx)) = audit_ctx {
+                    audit_event(
+                        ctx,
+                        "assign_collection",
+                        &req.collection,
+                        &format!("node_id={}", req.node_id),
+                        "success",
+                    );
+                }
+                Ok(Json(MessageResponse {
+                    message: format!(
+                        "Collection '{}' assigned to node {}",
+                        req.collection, req.node_id
+                    ),
+                }))
+            }
             Err(e) => {
                 if let Some(fwd) = e.forward_to_leader() {
                     if let Some(ref node) = fwd.leader_node {
@@ -1099,6 +1248,15 @@ pub async fn assign_collection(
     } else {
         if let Some(ref rt) = state.routing_table {
             rt.write().insert(req.collection.clone(), req.node_id);
+        }
+        if let Some(Extension(ref ctx)) = audit_ctx {
+            audit_event(
+                ctx,
+                "assign_collection",
+                &req.collection,
+                &format!("node_id={}", req.node_id),
+                "success",
+            );
         }
         Ok(Json(MessageResponse {
             message: format!(
@@ -1126,6 +1284,7 @@ pub async fn document_count(
 /// `POST /collections/:name/clear`
 pub async fn clear_collection(
     State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     let collection = state
@@ -1144,6 +1303,9 @@ pub async fn clear_collection(
         .create_collection(name.clone(), dimension, Some(config))
         .map_err(ApiError::Internal)?;
 
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(ctx, "clear_collection", &name, "", "success");
+    }
     tracing::info!(collection = %name, "Collection cleared");
     Ok(Json(MessageResponse {
         message: format!("Collection '{}' cleared", name),
@@ -1151,7 +1313,10 @@ pub async fn clear_collection(
 }
 
 /// `POST /admin/restore`
-pub async fn restore_all(State(state): State<AppState>) -> Result<Json<RestoreResponse>, ApiError> {
+pub async fn restore_all(
+    State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
+) -> Result<Json<RestoreResponse>, ApiError> {
     let loaded = vectorsdb_core::storage::load_all_collections(
         &state.data_dir,
         state.encryption_key.as_deref(),
@@ -1168,6 +1333,15 @@ pub async fn restore_all(State(state): State<AppState>) -> Result<Json<RestoreRe
         collections.insert(name, collection);
     }
 
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "restore_all",
+            "admin",
+            &format!("collections={}", count),
+            "success",
+        );
+    }
     Ok(Json(RestoreResponse {
         message: format!("Restored {} collections", count),
         collections_loaded: count,

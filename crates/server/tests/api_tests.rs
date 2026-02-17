@@ -1423,3 +1423,246 @@ async fn test_clear_nonexistent_collection() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+// ========== Audit Logging Tests ==========
+
+#[tokio::test]
+async fn test_audit_context_flows_in_no_auth_mode() {
+    // No auth mode: AuditContext should be "anonymous"
+    // Verifies handlers work when middleware injects AuditContext
+    let (base_url, _tmp) = spawn_app_no_recorder(None).await;
+
+    // Create, insert, search, delete — all should succeed
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .json(&serde_json::json!({"name": "audit_noauth", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = insert_test_document(&base_url, "audit_noauth", "hello", vec![1.0, 0.0, 0.0]).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let doc_id = body["id"].as_str().unwrap().to_string();
+
+    let resp = client()
+        .post(format!("{}/collections/audit_noauth/search", base_url))
+        .json(&serde_json::json!({"query_embedding": [1.0, 0.0, 0.0], "k": 5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client()
+        .delete(format!(
+            "{}/collections/audit_noauth/documents/{}",
+            base_url, doc_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_audit_context_flows_in_legacy_auth_mode() {
+    // Legacy single-key mode: AuditContext key_prefix = first 8 chars
+    let (base_url, _tmp) = spawn_app_no_recorder(Some("my-secret-api-key-1234")).await;
+
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer my-secret-api-key-1234")
+        .json(&serde_json::json!({"name": "audit_legacy", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client()
+        .post(format!("{}/collections/audit_legacy/documents", base_url))
+        .header("Authorization", "Bearer my-secret-api-key-1234")
+        .json(&serde_json::json!({"text": "doc", "embedding": [1.0, 0.0, 0.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client()
+        .post(format!("{}/admin/compact", base_url))
+        .header("Authorization", "Bearer my-secret-api-key-1234")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_audit_context_flows_in_rbac_mode() {
+    // RBAC mode: AuditContext includes role
+    let rbac = RbacConfig::from_entries(vec![
+        ApiKeyEntry {
+            key: "write-key-abcdefghij".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+        },
+        ApiKeyEntry {
+            key: "admin-key-abcdefghij".to_string(),
+            role: Role::Admin,
+            rate_limit_rps: None,
+        },
+    ]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Write role: create collection + insert
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer write-key-abcdefghij")
+        .json(&serde_json::json!({"name": "audit_rbac", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client()
+        .post(format!("{}/collections/audit_rbac/documents", base_url))
+        .header("Authorization", "Bearer write-key-abcdefghij")
+        .json(&serde_json::json!({"text": "rbac doc", "embedding": [1.0, 0.0, 0.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Admin role: backup + rebuild
+    let resp = client()
+        .post(format!("{}/admin/backup", base_url))
+        .header("Authorization", "Bearer admin-key-abcdefghij")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client()
+        .post(format!("{}/admin/rebuild/audit_rbac", base_url))
+        .header("Authorization", "Bearer admin-key-abcdefghij")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_audit_context_with_x_forwarded_for() {
+    // Verify X-Forwarded-For is picked up (operations succeed with the header)
+    let (base_url, _tmp) = spawn_app_no_recorder(None).await;
+
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("X-Forwarded-For", "203.0.113.50, 70.41.3.18")
+        .json(&serde_json::json!({"name": "audit_xff", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_audit_batch_insert_flows() {
+    let (base_url, _tmp) = spawn_app_no_recorder(None).await;
+    create_test_collection(&base_url, "audit_batch", 3).await;
+
+    let documents: Vec<serde_json::Value> = (0..3)
+        .map(|i| {
+            serde_json::json!({
+                "text": format!("batch doc {}", i),
+                "embedding": [i as f32, 0.0, 0.0]
+            })
+        })
+        .collect();
+
+    let resp = client()
+        .post(format!(
+            "{}/collections/audit_batch/documents/batch",
+            base_url
+        ))
+        .json(&serde_json::json!({"documents": documents}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["inserted"], 3);
+}
+
+#[tokio::test]
+async fn test_audit_update_and_clear_flow() {
+    let (base_url, _tmp) = spawn_app_no_recorder(None).await;
+    create_test_collection(&base_url, "audit_uc", 3).await;
+
+    let resp = insert_test_document(&base_url, "audit_uc", "original", vec![1.0, 0.0, 0.0]).await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let doc_id = body["id"].as_str().unwrap().to_string();
+
+    // Update
+    let resp = client()
+        .put(format!(
+            "{}/collections/audit_uc/documents/{}",
+            base_url, doc_id
+        ))
+        .json(&serde_json::json!({"text": "updated"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Clear
+    let resp = client()
+        .post(format!("{}/collections/audit_uc/clear", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_audit_save_and_load_flow() {
+    let (base_url, _tmp) = spawn_app_no_recorder(None).await;
+    create_test_collection(&base_url, "audit_sl", 3).await;
+    insert_test_document(&base_url, "audit_sl", "persist me", vec![1.0, 0.0, 0.0]).await;
+
+    // Save
+    let resp = client()
+        .post(format!("{}/collections/audit_sl/save", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Load
+    let resp = client()
+        .post(format!("{}/collections/audit_sl/load", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_audit_restore_flow() {
+    let (base_url, _tmp) = spawn_app_no_recorder(None).await;
+    create_test_collection(&base_url, "audit_rest", 3).await;
+
+    // Backup then restore
+    client()
+        .post(format!("{}/admin/backup", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client()
+        .post(format!("{}/admin/restore", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}

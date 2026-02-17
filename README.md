@@ -17,6 +17,7 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 - **Write-Ahead Log (WAL)** with CRC32 checksums and fsync for crash recovery
 - **Encryption at rest** — AES-256-GCM for snapshots and WAL, with key file or env var
 - **Auto-compaction** — automatic index rebuild when deleted nodes exceed a configurable threshold (default 20%)
+- **Structured audit logging** — WHO/WHAT/WHEN for all mutations, filterable via `RUST_LOG=audit=info`
 - **Bearer token authentication** via `VECTORS_DB_API_KEY`
 - **Prometheus metrics** at `/metrics`
 - **Request timeout** (30s) and **rate limiting** (100 req/s)
@@ -167,7 +168,7 @@ POST /collections/:name/search
 |----------|-------------|
 | `VECTORS_DB_API_KEY` | Bearer token for API authentication. If unset, auth is disabled. |
 | `VECTORS_DB_ENCRYPTION_KEY` | 64-character hex string (32 bytes) for AES-256-GCM encryption at rest. |
-| `RUST_LOG` | Log level filter (e.g., `vectors_db=info`) |
+| `RUST_LOG` | Log level filter (e.g., `vectorsdb_server=info`, `audit=info` for audit events) |
 
 ### CLI Arguments
 

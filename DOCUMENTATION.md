@@ -473,7 +473,7 @@ See the [`examples/`](examples/) directory for complete working scripts:
 | `VECTORS_DB_API_KEY` | Single bearer token for API authentication. If unset, auth is disabled. |
 | `VECTORS_DB_API_KEYS` | JSON array for RBAC configuration (overrides `VECTORS_DB_API_KEY`). See [Authentication](#7-authentication--authorization). |
 | `VECTORS_DB_ENCRYPTION_KEY` | 64-character hex string (32 bytes) for AES-256-GCM encryption at rest. Overridden by `--encryption-key-file`. |
-| `RUST_LOG` | Log level filter (e.g., `vectors_db=info`, `vectors_db=debug`). |
+| `RUST_LOG` | Log level filter (e.g., `vectorsdb_server=info`, `audit=info` for audit events only). |
 
 ### Example: Production startup
 
@@ -1284,6 +1284,55 @@ Internal error details (file paths, stack traces) are never exposed to API consu
 {"error": "Save operation failed"}
 {"error": "Internal error"}
 ```
+
+### Audit logging
+
+Structured audit events are emitted for all mutation operations using `target: "audit"` in the tracing system. Each event captures:
+
+| Field | Description |
+|-------|-------------|
+| `actor` | Masked API key prefix (first 8 chars + `...`) or `"anonymous"` |
+| `role` | RBAC role (`Read`, `Write`, `Admin`) or `None` for legacy/no-auth |
+| `client_ip` | Client IP from `X-Forwarded-For` / `X-Real-IP` headers |
+| `action` | Operation name (e.g., `create_collection`, `insert_document`) |
+| `resource` | Target resource (collection name or `"admin"`) |
+| `detail` | Operation-specific context (e.g., `doc_id=...`, `count=5`) |
+| `outcome` | `"success"` (errors are logged separately via `tracing::error!`) |
+
+**Audited operations**: `create_collection`, `delete_collection`, `clear_collection`, `insert_document`, `batch_insert`, `update_document`, `delete_document`, `search`, `save`, `load`, `compact`, `rebuild_index`, `backup`, `restore_all`, `assign_collection`.
+
+**Filtering**: Use `RUST_LOG=audit=info` to output only audit events, or combine with other directives:
+
+```bash
+# Audit events only
+RUST_LOG=audit=info ./vectors-db
+
+# Audit + server info
+RUST_LOG=audit=info,vectorsdb_server=info ./vectors-db
+```
+
+**Example JSON output** (with `tracing_subscriber::fmt().json()`):
+
+```json
+{
+  "timestamp": "2026-02-17T10:00:00Z",
+  "level": "INFO",
+  "target": "audit",
+  "fields": {
+    "actor": "abc12345...",
+    "role": "Write",
+    "client_ip": "192.168.1.1",
+    "action": "insert_document",
+    "resource": "my_collection",
+    "detail": "doc_id=550e8400-e29b-41d4-a716-446655440000",
+    "outcome": "success",
+    "message": "audit"
+  },
+  "span": { "request_id": "d4f5a6b7-..." }
+}
+```
+
+**Key masking**: API keys are never logged in full. Only the first 8 characters are shown (e.g., `abc12345...`). Keys with 8 or fewer characters are fully masked as `***`.
 
 ### Encryption at rest
 
