@@ -17,6 +17,7 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 - **Write-Ahead Log (WAL)** with CRC32 checksums and fsync for crash recovery
 - **Encryption at rest** — AES-256-GCM for snapshots and WAL, with key file or env var
 - **Auto-compaction** — automatic index rebuild when deleted nodes exceed a configurable threshold (default 20%)
+- **WAL streaming replication** — active-passive HA with automatic snapshot sync and real-time WAL streaming
 - **Structured audit logging** — WHO/WHAT/WHEN for all mutations, filterable via `RUST_LOG=audit=info`
 - **Bearer token authentication** via `VECTORS_DB_API_KEY`
 - **Prometheus metrics** at `/metrics`
@@ -117,6 +118,7 @@ curl -X POST http://localhost:3030/collections/my_collection/search \
 | POST | `/collections/:name/save` | Save collection snapshot to disk |
 | POST | `/collections/:name/load` | Load collection snapshot from disk |
 | POST | `/admin/compact` | Save all collections and truncate WAL |
+| POST | `/admin/promote` | Promote standby to primary (standby only) |
 
 ### Create Collection
 
@@ -180,6 +182,9 @@ POST /collections/:name/search
 | `--auto-compact-ratio` | 0.2 | Rebuild indices when >N% of nodes are deleted (0.0 = disabled) |
 | `--encryption-key-file` | — | Path to encryption key file (32 raw bytes or 64-char hex). Overrides env var. |
 | `--wal-strict` | false | Fail startup if WAL replay encounters errors |
+| `--replication-port` | 0 (disabled) | TCP port for replication listener (primary mode) |
+| `--standby-of` | — | `host:port` of primary to replicate from (standby mode) |
+| `--replication-buffer` | 1024 | Broadcast channel capacity for WAL streaming |
 
 ## Architecture
 
@@ -206,7 +211,8 @@ POST /collections/:name/search
    │  cos · l2 · dot     │
    └─────────────────────┘
 
-   Persistence: WAL (append + CRC32 + fsync) → Snapshot (.vdb bincode)
+   Persistence:  WAL (append + CRC32 + fsync) → Snapshot (.vdb bincode)
+   Replication:  WAL streaming (TCP) → Primary → Standby
 ```
 
 ## Benchmarks

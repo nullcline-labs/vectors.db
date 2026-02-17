@@ -5,6 +5,7 @@ use vectorsdb_core::storage::Database;
 use vectorsdb_server::api::create_router;
 use vectorsdb_server::api::handlers::AppState;
 use vectorsdb_server::api::rbac::{ApiKeyEntry, RbacConfig, Role};
+use vectorsdb_server::replication::ReplicationState;
 use vectorsdb_server::wal_async::WriteAheadLog;
 
 async fn spawn_app_no_recorder(api_key: Option<&str>) -> (String, TempDir) {
@@ -50,6 +51,7 @@ async fn spawn_app_full(
         )),
         memory_reserved: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         encryption_key: None,
+        replication: ReplicationState::new_primary(),
     };
 
     let app = create_router(state);
@@ -1209,6 +1211,7 @@ async fn test_routing_table_with_local_assignment() {
         )),
         memory_reserved: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         encryption_key: None,
+        replication: ReplicationState::new_primary(),
     };
 
     let app = vectorsdb_server::api::create_router(state);
@@ -1422,6 +1425,188 @@ async fn test_clear_nonexistent_collection() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+// ========== Replication / Standby Tests ==========
+
+async fn spawn_standby_app() -> (String, TempDir) {
+    let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+    let data_dir = tmp_dir.path().to_str().unwrap().to_string();
+
+    let db = Database::new();
+    let wal = Arc::new(WriteAheadLog::new(&data_dir, None).expect("Failed to create WAL"));
+
+    let prometheus_handle =
+        match metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder() {
+            Ok(handle) => handle,
+            Err(_) => metrics_exporter_prometheus::PrometheusBuilder::new()
+                .build_recorder()
+                .handle(),
+        };
+
+    let wal_path = std::path::PathBuf::from(&data_dir).join("wal.bin");
+    let state = AppState {
+        db,
+        data_dir,
+        wal,
+        wal_path,
+        api_key: None,
+        prometheus_handle,
+        max_memory_bytes: 0,
+        rbac: None,
+        raft: None,
+        node_id: None,
+        routing_table: None,
+        peer_addrs: None,
+        start_time: std::time::Instant::now(),
+        key_rate_limiters: std::sync::Arc::new(parking_lot::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        memory_reserved: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        encryption_key: None,
+        replication: ReplicationState::new_standby(),
+    };
+
+    let app = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind");
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (base_url, tmp_dir)
+}
+
+#[tokio::test]
+async fn test_standby_rejects_create_collection() {
+    let (base_url, _tmp) = spawn_standby_app().await;
+
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .json(&serde_json::json!({"name": "blocked", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("read-only"));
+}
+
+#[tokio::test]
+async fn test_standby_rejects_insert() {
+    let (base_url, _tmp) = spawn_standby_app().await;
+
+    let resp = client()
+        .post(format!("{}/collections/any/documents", base_url))
+        .json(&serde_json::json!({"text": "x", "embedding": [1.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn test_standby_allows_health() {
+    let (base_url, _tmp) = spawn_standby_app().await;
+
+    let resp = client()
+        .get(format!("{}/health", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_standby_allows_list_collections() {
+    let (base_url, _tmp) = spawn_standby_app().await;
+
+    let resp = client()
+        .get(format!("{}/collections", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_promote_on_standby() {
+    let (base_url, _tmp) = spawn_standby_app().await;
+
+    // Verify standby rejects writes
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .json(&serde_json::json!({"name": "blocked", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+
+    // Promote
+    let resp = client()
+        .post(format!("{}/admin/promote", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["promoted"], true);
+
+    // Now writes should work
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .json(&serde_json::json!({"name": "after_promote", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_promote_on_primary_fails() {
+    let (base_url, _tmp) = spawn_app_no_recorder(None).await;
+
+    let resp = client()
+        .post(format!("{}/admin/promote", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("not in standby"));
+}
+
+#[tokio::test]
+async fn test_standby_rejects_all_mutations() {
+    let (base_url, _tmp) = spawn_standby_app().await;
+
+    // compact
+    let resp = client()
+        .post(format!("{}/admin/compact", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+
+    // backup
+    let resp = client()
+        .post(format!("{}/admin/backup", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+
+    // restore
+    let resp = client()
+        .post(format!("{}/admin/restore", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
 }
 
 // ========== Audit Logging Tests ==========

@@ -244,3 +244,10 @@ pub struct RestoreResponse {
     pub message: String,
     pub collections_loaded: usize,
 }
+
+/// Response for `POST /admin/promote`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PromoteResponse {
+    pub promoted: bool,
+    pub wal_position: u64,
+}

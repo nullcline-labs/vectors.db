@@ -1,6 +1,6 @@
 # vectors.db Documentation
 
-A lightweight, high-performance, in-memory vector database written in Rust. Features HNSW approximate nearest neighbor search, BM25 full-text search, hybrid retrieval with Reciprocal Rank Fusion, scalar quantization for 4x memory reduction, Write-Ahead Log for crash recovery, AES-256-GCM encryption at rest, automatic compaction of deleted nodes, Role-Based Access Control, Prometheus metrics, TLS support, and optional Raft-based multi-node clustering.
+A lightweight, high-performance, in-memory vector database written in Rust. Features HNSW approximate nearest neighbor search, BM25 full-text search, hybrid retrieval with Reciprocal Rank Fusion, scalar quantization for 4x memory reduction, Write-Ahead Log for crash recovery, WAL streaming replication for high availability, AES-256-GCM encryption at rest, automatic compaction of deleted nodes, Role-Based Access Control, Prometheus metrics, TLS support, and optional Raft-based multi-node clustering.
 
 vectors.db can be used in two ways:
 
@@ -21,11 +21,12 @@ vectors.db can be used in two ways:
 8. [Data Model](#8-data-model)
 9. [Persistence & Durability](#9-persistence--durability)
 10. [Cluster Mode](#10-cluster-mode)
-11. [Observability](#11-observability)
-12. [Security](#12-security)
-13. [Architecture](#13-architecture)
-14. [Performance Benchmarks](#14-performance-benchmarks)
-15. [Limits & Defaults](#15-limits--defaults)
+11. [WAL Streaming Replication](#11-wal-streaming-replication)
+12. [Observability](#12-observability)
+13. [Security](#13-security)
+14. [Architecture](#14-architecture)
+15. [Performance Benchmarks](#15-performance-benchmarks)
+16. [Limits & Defaults](#16-limits--defaults)
 
 ---
 
@@ -463,6 +464,9 @@ See the [`examples/`](examples/) directory for complete working scripts:
 | `--shutdown-timeout` | | `30` | Graceful shutdown timeout in seconds. |
 | `--tls-cert` | | | Path to TLS certificate PEM file (requires `--tls-key`) |
 | `--tls-key` | | | Path to TLS private key PEM file (requires `--tls-cert`) |
+| `--replication-port` | | `0` (disabled) | TCP port for WAL streaming replication listener (primary mode). `0` disables. |
+| `--standby-of` | | | `host:port` of primary to replicate from. Starts the node in standby (read-only) mode. |
+| `--replication-buffer` | | `1024` | Broadcast channel capacity for WAL frame streaming to standby nodes. |
 | `--node-id` | | | Raft cluster node ID (omit for standalone mode) |
 | `--peers` | | | Comma-separated peer list: `"2=host2:3030,3=host3:3030"` |
 
@@ -785,6 +789,19 @@ Saves all collections and returns the list of generated `.vdb` files:
   "files": ["articles.vdb", "products.vdb", "users.vdb"]
 }
 ```
+
+#### `POST /admin/promote`
+
+Promotes a standby node to primary (read-write) mode. Only available on standby nodes. Returns HTTP 400 if the node is already a primary.
+
+```json
+{
+  "promoted": true,
+  "wal_position": 42
+}
+```
+
+After promotion, the node accepts write operations and disconnects from the former primary. This is a one-way operation — a promoted node cannot be demoted back to standby without restarting.
 
 #### `POST /admin/restore`
 
@@ -1183,7 +1200,78 @@ These are for inter-node communication and should not be called manually:
 
 ---
 
-## 11. Observability
+## 11. WAL Streaming Replication
+
+vectors.db supports active-passive high availability via WAL streaming replication. A **primary** node streams Write-Ahead Log frames in real-time to one or more **standby** nodes over a persistent TCP connection. If the primary fails, an operator manually promotes a standby via `POST /admin/promote`.
+
+### Starting a primary-standby pair
+
+```bash
+# Primary: serves reads and writes, streams WAL to standbys
+RUST_LOG=info cargo run --release -- \
+  --port 3030 --data-dir ./data-primary --replication-port 3031
+
+# Standby: read-only replica, receives WAL frames from primary
+RUST_LOG=info cargo run --release -- \
+  --port 3040 --data-dir ./data-standby --standby-of 127.0.0.1:3031
+```
+
+### How it works
+
+1. **Initial sync**: the standby connects to the primary's replication port and performs a handshake. The primary then sends full snapshots of all collections (chunked, CRC32-verified) so the standby starts with a complete copy of the data.
+
+2. **Continuous streaming**: after the initial sync, the primary broadcasts WAL frames to all connected standbys in real-time. Each WAL batch written to disk is also sent over the replication channel via a `tokio::sync::broadcast` channel (zero overhead when no standbys are connected).
+
+3. **Standby applies WAL frames**: the standby deserializes received WAL frames and applies them to its local database via `db.apply_wal_entry()`, keeping its state in sync with the primary.
+
+4. **Keepalive**: the primary sends `PING` every 5 seconds; the standby replies with `PONG`. This detects stale connections promptly.
+
+5. **Reconnection**: if the connection drops, the standby reconnects with exponential backoff (500ms to 30s). On reconnect, a fresh snapshot transfer occurs followed by resumed WAL streaming.
+
+### Standby behavior
+
+A standby node is **read-only**. All mutation endpoints (create/delete collection, insert/update/delete document, compact, backup, restore, rebuild, assign, clear) return **HTTP 503 Service Unavailable** with `{"error": "Node is in standby mode (read-only)"}`.
+
+Read endpoints work normally: search, list collections, get document, health, metrics.
+
+### Manual promotion
+
+```bash
+curl -X POST http://localhost:3040/admin/promote
+```
+
+Promotion is instantaneous (atomic flag flip). The standby:
+- Stops accepting WAL frames and disconnects from the primary
+- Switches to read-write mode
+- Begins accepting mutation requests
+
+After promotion, the node operates as a standalone primary. It does **not** automatically start streaming to other standbys unless `--replication-port` was also configured.
+
+### Replication protocol
+
+All messages use binary framing: `[u32 msg_type BE][u32 payload_len BE][payload]`
+
+| Type | Code | Direction | Payload |
+|------|------|-----------|---------|
+| Handshake | `0x01` | standby → primary | JSON: `{version, node_id}` |
+| HandshakeAck | `0x02` | primary → standby | JSON: `{ok, wal_position}` |
+| SnapshotBegin | `0x10` | primary → standby | JSON: `{collection_name, total_bytes}` |
+| SnapshotChunk | `0x11` | primary → standby | Raw bytes (64 KB chunks) |
+| SnapshotEnd | `0x12` | primary → standby | JSON: `{collection_name, checksum}` |
+| WalFrame | `0x20` | primary → standby | Raw WAL framed bytes |
+| WalAck | `0x21` | standby → primary | JSON: `{wal_position}` |
+| Ping | `0xF0` | primary → standby | Empty |
+| Pong | `0xF1` | standby → primary | Empty |
+
+### Limitations
+
+- **Plaintext replication only**: encrypted WAL frames are skipped during replication. Both primary and standby should use the same encryption configuration (or none).
+- **Manual promotion**: there is no automatic failover. An operator must call `POST /admin/promote` on the standby.
+- **Full resync on reconnect**: each reconnection triggers a fresh snapshot transfer. Incremental catch-up from a WAL position is not yet implemented.
+
+---
+
+## 12. Observability
 
 ### Structured logging
 
@@ -1233,7 +1321,7 @@ Use this for load balancer health checks and container orchestration probes.
 
 ---
 
-## 12. Security
+## 13. Security
 
 ### Authentication
 
@@ -1349,7 +1437,7 @@ RUST_LOG=audit=info,vectorsdb_server=info ./vectors-db
 
 ---
 
-## 13. Architecture
+## 14. Architecture
 
 ### System overview
 
@@ -1380,8 +1468,9 @@ RUST_LOG=audit=info,vectorsdb_server=info ./vectors-db
    │  f32 exact + u8 fast │
    └──────────────────────┘
 
-   Persistence: WAL (append + CRC32 + fsync) → Snapshot (.vdb bincode)
-   Cluster:     Raft consensus (openraft) → State machine replication
+   Persistence:  WAL (append + CRC32 + fsync) → Snapshot (.vdb bincode)
+   Replication:  WAL streaming (TCP) → Primary broadcasts → Standby applies
+   Cluster:      Raft consensus (openraft) → State machine replication
 ```
 
 ### HNSW Index
@@ -1446,7 +1535,7 @@ Request processing (outermost to innermost):
 
 ---
 
-## 14. Performance Benchmarks
+## 15. Performance Benchmarks
 
 vectors.db includes a comprehensive benchmark suite using standard ANN-Benchmarks datasets and the BEIR information retrieval benchmark. All benchmarks use a custom harness (no Criterion) and measure real-world performance including quantization overhead.
 
@@ -1726,7 +1815,7 @@ Compact mode uses u8 quantized vectors with asymmetric f32-vs-u8 distance for al
 
 ---
 
-## 15. Limits & Defaults
+## 16. Limits & Defaults
 
 ### Input limits
 
@@ -1783,5 +1872,5 @@ Compact mode uses u8 quantized vectors with asymmetric f32-vs-u8 distance for al
 | 413 | Payload too large (> 10 MB) |
 | 429 | Too many requests (rate limit exceeded) |
 | 500 | Internal server error |
-| 503 | Service unavailable (memory degraded) |
+| 503 | Service unavailable (memory degraded or standby read-only mode) |
 | 507 | Insufficient storage (memory limit exceeded) |

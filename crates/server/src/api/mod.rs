@@ -216,6 +216,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/admin/restore", post(handlers::restore_all))
         .route("/admin/routing", get(handlers::routing_table))
         .route("/admin/assign", post(handlers::assign_collection))
+        .route("/admin/promote", post(handlers::promote))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

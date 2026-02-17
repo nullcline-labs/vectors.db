@@ -7,6 +7,7 @@ use crate::api::models::*;
 use crate::api::rate_limit::TokenBucket;
 use crate::cluster::types::{LogEntry as RaftLogEntry, NodeId};
 use crate::cluster::Raft;
+use crate::replication::ReplicationState;
 use crate::wal_async::WriteAheadLog;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -49,6 +50,18 @@ pub struct AppState {
     pub memory_reserved: Arc<AtomicUsize>,
     /// Optional encryption key for encrypted snapshots and WAL.
     pub encryption_key: Option<Arc<EncryptionKey>>,
+    /// Replication state (standby flag, WAL position).
+    pub replication: ReplicationState,
+}
+
+/// Reject mutation requests when this node is in standby (read-only) mode.
+fn check_standby(state: &AppState) -> Result<(), ApiError> {
+    if state.replication.is_standby() {
+        return Err(ApiError::ServiceUnavailable(
+            "Standby node: read-only".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_embedding(embedding: &[f32]) -> Result<(), ApiError> {
@@ -189,6 +202,7 @@ pub async fn create_collection(
     audit_ctx: Option<Extension<AuditContext>>,
     Json(req): Json<CreateCollectionRequest>,
 ) -> Result<Json<CreateCollectionResponse>, ApiError> {
+    check_standby(&state)?;
     validate_collection_name(&req.name)?;
 
     if req.dimension == 0 || req.dimension > config::MAX_DIMENSION {
@@ -299,6 +313,7 @@ pub async fn delete_collection(
     audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let wal_entry = WalEntry::DeleteCollection { name: name.clone() };
     let raft_entry = RaftLogEntry::DeleteCollection { name: name.clone() };
 
@@ -342,6 +357,7 @@ pub async fn insert_document(
     Path(name): Path<String>,
     Json(req): Json<InsertDocumentRequest>,
 ) -> Result<Json<InsertResponse>, ApiError> {
+    check_standby(&state)?;
     let estimated_bytes = req.embedding.len() * 4 + req.text.len() + 256;
     let _mem_guard = check_memory_limit_reserve(&state, estimated_bytes)?;
     validate_embedding(&req.embedding)?;
@@ -433,6 +449,7 @@ pub async fn batch_insert_documents(
     Path(name): Path<String>,
     Json(req): Json<BatchInsertRequest>,
 ) -> Result<Json<BatchInsertResponse>, ApiError> {
+    check_standby(&state)?;
     let estimated_bytes: usize = req
         .documents
         .iter()
@@ -590,6 +607,7 @@ pub async fn delete_document(
     audit_ctx: Option<Extension<AuditContext>>,
     Path((name, id)): Path<(String, Uuid)>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let collection = state
         .db
         .get_collection(&name)
@@ -655,6 +673,7 @@ pub async fn update_document(
     Path((name, id)): Path<(String, Uuid)>,
     Json(req): Json<UpdateDocumentRequest>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let collection = state
         .db
         .get_collection(&name)
@@ -894,6 +913,7 @@ pub async fn save(
     audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let collection = state
         .db
         .get_collection(&name)
@@ -923,6 +943,7 @@ pub async fn load(
     audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let path = std::path::Path::new(&state.data_dir).join(format!("{}.vdb", name));
     if !path.exists() {
         return Err(ApiError::NotFound(format!(
@@ -955,6 +976,7 @@ pub async fn compact(
     State(state): State<AppState>,
     audit_ctx: Option<Extension<AuditContext>>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let _gate = state.wal.freeze();
     let collections = state.db.collections.read();
     for (name, collection) in collections.iter() {
@@ -1134,6 +1156,7 @@ pub async fn rebuild_index(
     audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<RebuildResponse>, ApiError> {
+    check_standby(&state)?;
     let collection = state
         .db
         .get_collection(&name)
@@ -1164,6 +1187,7 @@ pub async fn backup(
     State(state): State<AppState>,
     audit_ctx: Option<Extension<AuditContext>>,
 ) -> Result<Json<BackupResponse>, ApiError> {
+    check_standby(&state)?;
     let _gate = state.wal.freeze();
     let collections = state.db.collections.read();
     let mut files = Vec::new();
@@ -1209,6 +1233,7 @@ pub async fn assign_collection(
     audit_ctx: Option<Extension<AuditContext>>,
     Json(req): Json<AssignCollectionRequest>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let raft_entry = RaftLogEntry::AssignCollection {
         collection_name: req.collection.clone(),
         owner_node_id: req.node_id,
@@ -1287,6 +1312,7 @@ pub async fn clear_collection(
     audit_ctx: Option<Extension<AuditContext>>,
     Path(name): Path<String>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    check_standby(&state)?;
     let collection = state
         .db
         .get_collection(&name)
@@ -1317,6 +1343,7 @@ pub async fn restore_all(
     State(state): State<AppState>,
     audit_ctx: Option<Extension<AuditContext>>,
 ) -> Result<Json<RestoreResponse>, ApiError> {
+    check_standby(&state)?;
     let loaded = vectorsdb_core::storage::load_all_collections(
         &state.data_dir,
         state.encryption_key.as_deref(),
@@ -1345,5 +1372,35 @@ pub async fn restore_all(
     Ok(Json(RestoreResponse {
         message: format!("Restored {} collections", count),
         collections_loaded: count,
+    }))
+}
+
+/// `POST /admin/promote`
+///
+/// Promote a standby node to primary (read-write). Only works on standby nodes.
+pub async fn promote(
+    State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
+) -> Result<Json<PromoteResponse>, ApiError> {
+    if !state.replication.is_standby() {
+        return Err(ApiError::BadRequest("Node is not in standby mode".into()));
+    }
+
+    state.replication.promote();
+    let wal_position = state.replication.wal_position();
+
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        audit_event(
+            ctx,
+            "promote",
+            "admin",
+            &format!("wal_position={}", wal_position),
+            "success",
+        );
+    }
+    tracing::info!(wal_position = wal_position, "Node promoted to primary");
+    Ok(Json(PromoteResponse {
+        promoted: true,
+        wal_position,
     }))
 }

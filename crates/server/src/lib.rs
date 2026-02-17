@@ -7,5 +7,7 @@
 pub mod api;
 /// Raft consensus clustering.
 pub mod cluster;
+/// WAL streaming replication for active-passive HA.
+pub mod replication;
 /// Async Write-Ahead Log with group commit (tokio-based).
 pub mod wal_async;

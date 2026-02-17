@@ -17,6 +17,7 @@ use serde_json::json;
 /// - `Conflict` → 409
 /// - `InsufficientStorage` → 507
 /// - `TooManyRequests` → 429
+/// - `ServiceUnavailable` → 503
 /// - `Redirect` → 307 (with `Location` header)
 /// - `Internal` → 500
 #[derive(Debug)]
@@ -35,6 +36,8 @@ pub enum ApiError {
     Conflict(String),
     /// Memory limit exceeded (507).
     InsufficientStorage(String),
+    /// Service unavailable — standby node is read-only (503).
+    ServiceUnavailable(String),
     /// Redirect to another node (307 with `Location` header).
     Redirect(String),
     /// Unexpected server error (500).
@@ -68,6 +71,7 @@ impl IntoResponse for ApiError {
                     ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
                     ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
                     ApiError::InsufficientStorage(msg) => (StatusCode::INSUFFICIENT_STORAGE, msg),
+                    ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
                     ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
                     ApiError::Redirect(_) => unreachable!(),
                 };

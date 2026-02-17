@@ -12,6 +12,7 @@ use vectorsdb_server::api::handlers::AppState;
 use vectorsdb_server::api::metrics;
 use vectorsdb_server::api::rbac::{ApiKeyEntry, RbacConfig};
 use vectorsdb_server::cluster;
+use vectorsdb_server::replication::ReplicationState;
 use vectorsdb_server::wal_async::WriteAheadLog;
 
 #[derive(Parser)]
@@ -64,6 +65,18 @@ struct Args {
     /// Comma-separated peer addresses (id=addr format, e.g. "2=host2:3030,3=host3:3030")
     #[arg(long)]
     peers: Option<String>,
+
+    /// TCP port for WAL streaming replication listener (primary mode). 0 = disabled.
+    #[arg(long, default_value_t = 0)]
+    replication_port: u16,
+
+    /// Address of the primary to replicate from (standby mode), e.g. "host:3031"
+    #[arg(long)]
+    standby_of: Option<String>,
+
+    /// Broadcast channel capacity for WAL replication frames
+    #[arg(long, default_value_t = 1024)]
+    replication_buffer: usize,
 }
 
 #[tokio::main]
@@ -147,8 +160,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Set up replication state and broadcast channel
+    let is_standby = args.standby_of.is_some();
+    let replication_state = if is_standby {
+        ReplicationState::new_standby()
+    } else {
+        ReplicationState::new_primary()
+    };
+
+    let replication_tx = if args.replication_port > 0 || is_standby {
+        let (tx, _) = tokio::sync::broadcast::channel(args.replication_buffer);
+        Some(tx)
+    } else {
+        None
+    };
+
     // Initialize WAL and replay pending entries
-    let wal = Arc::new(WriteAheadLog::new(&args.data_dir, encryption_key.clone())?);
+    let wal = Arc::new(WriteAheadLog::with_replication(
+        &args.data_dir,
+        encryption_key.clone(),
+        replication_tx.clone(),
+    )?);
 
     match wal.replay() {
         Ok((entries, stats)) => {
@@ -275,6 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         key_rate_limiters: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         memory_reserved: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         encryption_key: encryption_key.clone(),
+        replication: replication_state.clone(),
     };
 
     let mut app = create_router(state);
@@ -296,9 +329,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_interval_secs = args.snapshot_interval,
         tls = args.tls_cert.is_some(),
         cluster_mode = args.node_id.is_some(),
+        replication = if is_standby { "standby" } else if args.replication_port > 0 { "primary" } else { "standalone" },
         collections = collections_count,
         "vectors.db ready"
     );
+
+    // Spawn replication tasks
+    if args.replication_port > 0 {
+        if let Some(ref tx) = replication_tx {
+            let repl_addr: std::net::SocketAddr = format!("0.0.0.0:{}", args.replication_port)
+                .parse()
+                .unwrap();
+            let repl_db = db.clone();
+            let repl_state = replication_state.clone();
+            let repl_tx = tx.clone();
+            let repl_data_dir = args.data_dir.clone();
+            tokio::spawn(async move {
+                if let Err(e) = vectorsdb_server::replication::primary::start_replication_listener(
+                    repl_addr,
+                    repl_db,
+                    repl_state,
+                    repl_tx,
+                    repl_data_dir,
+                )
+                .await
+                {
+                    tracing::error!("Replication listener failed: {}", e);
+                }
+            });
+            tracing::info!(
+                "Replication listener started on port {}",
+                args.replication_port
+            );
+        }
+    }
+
+    if let Some(ref primary_addr) = args.standby_of {
+        let repl_db = db.clone();
+        let repl_state = replication_state.clone();
+        let repl_data_dir = args.data_dir.clone();
+        let addr = primary_addr.clone();
+        tokio::spawn(async move {
+            vectorsdb_server::replication::standby::start_standby(
+                addr,
+                repl_db,
+                repl_state,
+                repl_data_dir,
+            )
+            .await;
+        });
+        tracing::info!("Standby mode: replicating from {}", primary_addr);
+    }
 
     // Spawn collection metrics background task
     let metrics_db = db.clone();

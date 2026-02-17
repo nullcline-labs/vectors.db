@@ -9,7 +9,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use vectorsdb_core::config;
 use vectorsdb_core::storage::crypto::EncryptionKey;
 use vectorsdb_core::storage::wal::WalEntry;
@@ -31,11 +31,29 @@ pub struct WriteAheadLog {
     path: PathBuf,
     writer: Arc<Mutex<BufWriter<File>>>,
     encryption_key: Option<Arc<EncryptionKey>>,
+    /// Optional broadcast sender for WAL streaming replication.
+    /// When set, flushed WAL frame bytes are broadcast to all subscribers.
+    /// Kept alive here to prevent the channel from closing; the actual
+    /// sender clone is passed to the background batch writer task.
+    #[allow(dead_code)]
+    replication_tx: Option<broadcast::Sender<Vec<u8>>>,
 }
 
 impl WriteAheadLog {
     /// Open or create the WAL file and spawn the background batch writer task.
     pub fn new(data_dir: &str, encryption_key: Option<Arc<EncryptionKey>>) -> io::Result<Self> {
+        Self::with_replication(data_dir, encryption_key, None)
+    }
+
+    /// Open or create the WAL file with an optional replication broadcast channel.
+    ///
+    /// When `replication_tx` is provided, every successfully flushed batch of WAL
+    /// frame bytes is broadcast to all subscribers (standby replication listeners).
+    pub fn with_replication(
+        data_dir: &str,
+        encryption_key: Option<Arc<EncryptionKey>>,
+        replication_tx: Option<broadcast::Sender<Vec<u8>>>,
+    ) -> io::Result<Self> {
         fs::create_dir_all(data_dir)?;
         let path = PathBuf::from(data_dir).join("wal.bin");
         let mut opts = OpenOptions::new();
@@ -53,9 +71,10 @@ impl WriteAheadLog {
 
         let task_writer = Arc::clone(&writer);
         let task_gate = Arc::clone(&write_gate);
+        let task_repl_tx = replication_tx.clone();
 
         tokio::spawn(async move {
-            batch_writer_loop(submit_rx, task_writer, task_gate).await;
+            batch_writer_loop(submit_rx, task_writer, task_gate, task_repl_tx).await;
         });
 
         Ok(Self {
@@ -64,6 +83,7 @@ impl WriteAheadLog {
             path,
             writer,
             encryption_key,
+            replication_tx,
         })
     }
 
@@ -218,6 +238,7 @@ async fn batch_writer_loop(
     mut rx: mpsc::Receiver<GroupCommitRequest>,
     writer: Arc<Mutex<BufWriter<File>>>,
     write_gate: Arc<parking_lot::RwLock<()>>,
+    replication_tx: Option<broadcast::Sender<Vec<u8>>>,
 ) {
     let max_batch = config::WAL_GROUP_COMMIT_MAX_BATCH;
     let max_wait = Duration::from_micros(config::WAL_GROUP_COMMIT_MAX_WAIT_US);
@@ -247,15 +268,18 @@ async fn batch_writer_loop(
             }
         }
 
-        flush_batch(&mut batch, &writer, &write_gate);
+        flush_batch(&mut batch, &writer, &write_gate, &replication_tx);
     }
 }
 
 /// Write all entries in the batch, fsync once, and notify all callers.
+/// If a replication broadcast sender is provided, also broadcast the
+/// concatenated framed bytes to all subscribers (standby nodes).
 fn flush_batch(
     batch: &mut Vec<GroupCommitRequest>,
     writer: &Arc<Mutex<BufWriter<File>>>,
     write_gate: &Arc<parking_lot::RwLock<()>>,
+    replication_tx: &Option<broadcast::Sender<Vec<u8>>>,
 ) {
     let _gate = write_gate.read();
     let mut w = writer.lock();
@@ -287,6 +311,15 @@ fn flush_batch(
                 .send(Err(io::Error::new(e.kind(), e.to_string())));
         }
     } else {
+        // Broadcast framed bytes to replication subscribers
+        if let Some(ref tx) = replication_tx {
+            let mut combined = Vec::new();
+            for req in batch.iter() {
+                combined.extend_from_slice(&req.framed_bytes);
+            }
+            // Ignore send errors (no subscribers connected yet is fine)
+            let _ = tx.send(combined);
+        }
         for req in batch.drain(..) {
             let _ = req.result_tx.send(Ok(()));
         }
