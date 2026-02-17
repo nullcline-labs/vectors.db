@@ -7,8 +7,6 @@
 A lightweight, in-memory vector database with HNSW indexing, BM25 full-text search, and hybrid retrieval.
 
 [![CI](https://github.com/nullcline-labs/vectors.db/actions/workflows/ci.yml/badge.svg)](https://github.com/nullcline-labs/vectors.db/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/vectors-db)](https://pypi.org/project/vectors-db/)
-[![Python](https://img.shields.io/pypi/pyversions/vectors-db)](https://pypi.org/project/vectors-db/)
 
 ## Features
 
