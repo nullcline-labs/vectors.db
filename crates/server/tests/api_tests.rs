@@ -20,7 +20,7 @@ async fn spawn_app_full(
     let data_dir = tmp_dir.path().to_str().unwrap().to_string();
 
     let db = Database::new();
-    let wal = Arc::new(WriteAheadLog::new(&data_dir).expect("Failed to create WAL"));
+    let wal = Arc::new(WriteAheadLog::new(&data_dir, None).expect("Failed to create WAL"));
 
     let prometheus_handle =
         match metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder() {
@@ -49,6 +49,7 @@ async fn spawn_app_full(
             std::collections::HashMap::new(),
         )),
         memory_reserved: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        encryption_key: None,
     };
 
     let app = create_router(state);
@@ -1176,7 +1177,7 @@ async fn test_routing_table_with_local_assignment() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let data_dir = tmp_dir.path().to_str().unwrap().to_string();
     let db = vectorsdb_core::storage::Database::new();
-    let wal = Arc::new(WriteAheadLog::new(&data_dir).unwrap());
+    let wal = Arc::new(WriteAheadLog::new(&data_dir, None).unwrap());
 
     let prometheus_handle =
         match metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder() {
@@ -1207,6 +1208,7 @@ async fn test_routing_table_with_local_assignment() {
             std::collections::HashMap::new(),
         )),
         memory_reserved: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        encryption_key: None,
     };
 
     let app = vectorsdb_server::api::create_router(state);

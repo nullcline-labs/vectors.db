@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
 use vectorsdb_core::config;
+use vectorsdb_core::storage::crypto::EncryptionKey;
 use vectorsdb_core::storage::{load_all_collections, save_collection, Database};
 use vectorsdb_server::api::create_router;
 use vectorsdb_server::api::handlers::AppState;
@@ -56,6 +57,10 @@ struct Args {
     #[arg(long, default_value_t = config::DEFAULT_AUTO_COMPACT_RATIO)]
     auto_compact_ratio: f32,
 
+    /// Path to encryption key file (32 raw bytes or 64-char hex). Overrides VECTORS_DB_ENCRYPTION_KEY env var.
+    #[arg(long)]
+    encryption_key_file: Option<String>,
+
     /// Comma-separated peer addresses (id=addr format, e.g. "2=host2:3030,3=host3:3030")
     #[arg(long)]
     peers: Option<String>,
@@ -101,10 +106,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Load encryption key: --encryption-key-file takes precedence over env var
+    let encryption_key: Option<Arc<EncryptionKey>> = if let Some(ref key_file) =
+        args.encryption_key_file
+    {
+        let key = EncryptionKey::from_file(std::path::Path::new(key_file)).unwrap_or_else(|e| {
+            eprintln!(
+                "Error: failed to read encryption key file '{}': {}",
+                key_file, e
+            );
+            std::process::exit(1);
+        });
+        tracing::info!("Encryption at rest enabled (key file: {})", key_file);
+        Some(Arc::new(key))
+    } else if let Ok(hex) = std::env::var("VECTORS_DB_ENCRYPTION_KEY") {
+        let key = EncryptionKey::from_hex(&hex).unwrap_or_else(|e| {
+            eprintln!("Error: invalid VECTORS_DB_ENCRYPTION_KEY: {}", e);
+            std::process::exit(1);
+        });
+        tracing::info!("Encryption at rest enabled (env var)");
+        Some(Arc::new(key))
+    } else {
+        None
+    };
+
     let db = Database::new();
 
     // Load existing collection snapshots from disk
-    match load_all_collections(&args.data_dir) {
+    match load_all_collections(&args.data_dir, encryption_key.as_deref()) {
         Ok(collections) => {
             let mut db_collections = db.collections.write();
             for collection in collections {
@@ -119,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Initialize WAL and replay pending entries
-    let wal = Arc::new(WriteAheadLog::new(&args.data_dir)?);
+    let wal = Arc::new(WriteAheadLog::new(&args.data_dir, encryption_key.clone())?);
 
     match wal.replay() {
         Ok((entries, stats)) => {
@@ -245,6 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_time: Instant::now(),
         key_rate_limiters: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         memory_reserved: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        encryption_key: encryption_key.clone(),
     };
 
     let mut app = create_router(state);
@@ -289,6 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let snap_wal = wal.clone();
         let snap_data_dir = args.data_dir.clone();
         let snap_interval = args.snapshot_interval;
+        let snap_enc_key = encryption_key.clone();
         tracing::info!("Auto-snapshots enabled every {}s", snap_interval);
         if auto_compact_ratio > 0.0 {
             tracing::info!(
@@ -306,7 +337,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let collections = snap_db.collections.read();
                 let mut all_saved = true;
                 for (name, collection) in collections.iter() {
-                    if let Err(e) = save_collection(collection, &snap_data_dir) {
+                    if let Err(e) =
+                        save_collection(collection, &snap_data_dir, snap_enc_key.as_deref())
+                    {
                         tracing::error!("Snapshot failed for '{}': {}", name, e);
                         all_saved = false;
                     }
@@ -349,7 +382,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 name,
                                 count
                             );
-                            if let Err(e) = save_collection(&col, &snap_data_dir) {
+                            if let Err(e) =
+                                save_collection(&col, &snap_data_dir, snap_enc_key.as_deref())
+                            {
                                 tracing::error!(
                                     "Auto-compaction: failed to save '{}': {}",
                                     name,
@@ -392,7 +427,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    flush_and_shutdown(&db, &wal, &args.data_dir, shutdown_timeout);
+    flush_and_shutdown(
+        &db,
+        &wal,
+        &args.data_dir,
+        shutdown_timeout,
+        encryption_key.as_deref(),
+    );
 
     Ok(())
 }
@@ -443,7 +484,13 @@ async fn wait_for_signal() {
     tracing::info!("Shutting down gracefully, draining in-flight requests...");
 }
 
-fn flush_and_shutdown(db: &Database, wal: &WriteAheadLog, data_dir: &str, timeout_secs: u64) {
+fn flush_and_shutdown(
+    db: &Database,
+    wal: &WriteAheadLog,
+    data_dir: &str,
+    timeout_secs: u64,
+    encryption_key: Option<&EncryptionKey>,
+) {
     tracing::info!("All requests drained, flushing data...");
 
     let _gate = wal.freeze();
@@ -461,7 +508,7 @@ fn flush_and_shutdown(db: &Database, wal: &WriteAheadLog, data_dir: &str, timeou
             all_saved = false;
             break;
         }
-        match save_collection(collection, data_dir) {
+        match save_collection(collection, data_dir, encryption_key) {
             Ok(()) => tracing::info!("Saved collection '{}' on shutdown", name),
             Err(e) => {
                 tracing::error!("Failed to save collection '{}': {}", name, e);

@@ -11,8 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use vectorsdb_core::config;
+use vectorsdb_core::storage::crypto::EncryptionKey;
 use vectorsdb_core::storage::wal::WalEntry;
 use vectorsdb_core::storage::ReplayStats;
+
+/// Sentinel CRC value that marks an encrypted WAL frame.
+const ENCRYPTED_FRAME_SENTINEL: u32 = 0xFFFF_FFFF;
 
 /// A request from a caller to append an entry to the WAL.
 struct GroupCommitRequest {
@@ -26,11 +30,12 @@ pub struct WriteAheadLog {
     write_gate: Arc<parking_lot::RwLock<()>>,
     path: PathBuf,
     writer: Arc<Mutex<BufWriter<File>>>,
+    encryption_key: Option<Arc<EncryptionKey>>,
 }
 
 impl WriteAheadLog {
     /// Open or create the WAL file and spawn the background batch writer task.
-    pub fn new(data_dir: &str) -> io::Result<Self> {
+    pub fn new(data_dir: &str, encryption_key: Option<Arc<EncryptionKey>>) -> io::Result<Self> {
         fs::create_dir_all(data_dir)?;
         let path = PathBuf::from(data_dir).join("wal.bin");
         let mut opts = OpenOptions::new();
@@ -58,12 +63,16 @@ impl WriteAheadLog {
             write_gate,
             path,
             writer,
+            encryption_key,
         })
     }
 
     /// Append a WAL entry using group commit.
     pub async fn append(&self, entry: &WalEntry) -> io::Result<()> {
-        let framed = serialize_and_frame(entry)?;
+        let framed = match &self.encryption_key {
+            Some(key) => serialize_and_frame_encrypted(entry, key)?,
+            None => serialize_and_frame(entry)?,
+        };
 
         let (result_tx, result_rx) = oneshot::channel();
         self.submit_tx
@@ -79,7 +88,9 @@ impl WriteAheadLog {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL batch result lost"))?
     }
 
-    /// Read all entries from the WAL file, verifying CRC32 checksums.
+    /// Read all entries from the WAL file, verifying integrity.
+    ///
+    /// Supports both encrypted (sentinel `0xFFFFFFFF`) and plaintext (CRC32) frames.
     pub fn replay(&self) -> io::Result<(Vec<WalEntry>, ReplayStats)> {
         let file = File::open(&self.path)?;
         let mut reader = BufReader::new(file);
@@ -108,13 +119,37 @@ impl WriteAheadLog {
                 }
                 Err(e) => return Err(e),
             }
-            let computed_crc = crc32fast::hash(&data);
-            if computed_crc != stored_crc {
-                tracing::warn!("WAL entry CRC mismatch, stopping replay");
-                stats.crc_errors += 1;
-                break;
-            }
-            match bincode::deserialize::<WalEntry>(&data) {
+
+            // Detect encrypted vs plaintext frame
+            let payload = if stored_crc == ENCRYPTED_FRAME_SENTINEL {
+                match &self.encryption_key {
+                    Some(key) => match key.decrypt(&data) {
+                        Ok(plaintext) => plaintext,
+                        Err(e) => {
+                            tracing::warn!("WAL encrypted entry decryption failed: {}", e);
+                            stats.crc_errors += 1;
+                            break;
+                        }
+                    },
+                    None => {
+                        tracing::warn!(
+                            "WAL contains encrypted entries but no encryption key provided"
+                        );
+                        stats.crc_errors += 1;
+                        break;
+                    }
+                }
+            } else {
+                let computed_crc = crc32fast::hash(&data);
+                if computed_crc != stored_crc {
+                    tracing::warn!("WAL entry CRC mismatch, stopping replay");
+                    stats.crc_errors += 1;
+                    break;
+                }
+                data
+            };
+
+            match bincode::deserialize::<WalEntry>(&payload) {
                 Ok(entry) => {
                     entries.push(entry);
                     stats.success += 1;
@@ -162,6 +197,19 @@ fn serialize_and_frame(entry: &WalEntry) -> io::Result<Vec<u8>> {
     framed.extend_from_slice(&len.to_be_bytes());
     framed.extend_from_slice(&crc.to_be_bytes());
     framed.extend_from_slice(&bytes);
+    Ok(framed)
+}
+
+/// Serialize a WAL entry into an encrypted on-disk frame.
+fn serialize_and_frame_encrypted(entry: &WalEntry, key: &EncryptionKey) -> io::Result<Vec<u8>> {
+    let bytes = bincode::serialize(entry).map_err(|e| io::Error::other(e.to_string()))?;
+    let encrypted = key.encrypt(&bytes);
+    let len = encrypted.len() as u32;
+
+    let mut framed = Vec::with_capacity(8 + encrypted.len());
+    framed.extend_from_slice(&len.to_be_bytes());
+    framed.extend_from_slice(&ENCRYPTED_FRAME_SENTINEL.to_be_bytes());
+    framed.extend_from_slice(&encrypted);
     Ok(framed)
 }
 

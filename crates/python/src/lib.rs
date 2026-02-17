@@ -15,6 +15,7 @@ use vectorsdb_core::document::{Document, MetadataValue};
 use vectorsdb_core::filter_types::{FilterClause, FilterCondition, FilterOperator};
 use vectorsdb_core::hnsw::distance::DistanceMetric;
 use vectorsdb_core::hnsw::graph::HnswConfig;
+use vectorsdb_core::storage::crypto::EncryptionKey;
 use vectorsdb_core::storage::{load_collection, save_collection, Database};
 
 // ---------------------------------------------------------------------------
@@ -547,8 +548,14 @@ impl VectorDB {
     /// Save a collection snapshot to disk.
     ///
     /// Uses the data_dir passed at construction, or a custom path.
-    #[pyo3(signature = (collection, path=None))]
-    fn save(&self, collection: &str, path: Option<&str>) -> PyResult<()> {
+    /// If encryption_key is provided (64-char hex), the snapshot is encrypted with AES-256-GCM.
+    #[pyo3(signature = (collection, path=None, encryption_key=None))]
+    fn save(
+        &self,
+        collection: &str,
+        path: Option<&str>,
+        encryption_key: Option<&str>,
+    ) -> PyResult<()> {
         let col = self
             .db
             .get_collection(collection)
@@ -561,14 +568,20 @@ impl VectorDB {
                 PyValueError::new_err("no path specified and VectorDB was created without data_dir")
             })?;
 
-        save_collection(&col, &dir).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        let enc_key = encryption_key
+            .map(|hex| EncryptionKey::from_hex(hex).map_err(PyValueError::new_err))
+            .transpose()?;
+
+        save_collection(&col, &dir, enc_key.as_ref())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Load a collection snapshot from disk.
     ///
     /// Uses the data_dir passed at construction, or a custom path.
-    #[pyo3(signature = (name, path=None))]
-    fn load(&self, name: &str, path: Option<&str>) -> PyResult<()> {
+    /// If encryption_key is provided (64-char hex), encrypted snapshots are decrypted.
+    #[pyo3(signature = (name, path=None, encryption_key=None))]
+    fn load(&self, name: &str, path: Option<&str>, encryption_key: Option<&str>) -> PyResult<()> {
         let dir = path
             .map(|s| s.to_string())
             .or_else(|| self.data_dir.clone())
@@ -576,8 +589,12 @@ impl VectorDB {
                 PyValueError::new_err("no path specified and VectorDB was created without data_dir")
             })?;
 
+        let enc_key = encryption_key
+            .map(|hex| EncryptionKey::from_hex(hex).map_err(PyValueError::new_err))
+            .transpose()?;
+
         let file_path = Path::new(&dir).join(format!("{}.vdb", name));
-        let collection = load_collection(&file_path)
+        let collection = load_collection(&file_path, enc_key.as_ref())
             .map_err(|e| PyRuntimeError::new_err(format!("failed to load '{}': {}", name, e)))?;
 
         // Insert into the database (replace if exists)

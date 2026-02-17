@@ -271,22 +271,25 @@ class VectorDB:
         """
         ...
 
-    def save(self, collection: str, path: str | None = None) -> None:
+    def save(self, collection: str, path: str | None = None, encryption_key: str | None = None) -> None:
         """Save a collection snapshot to disk.
 
         Args:
             collection: Collection name.
             path: Directory to save to. Falls back to ``data_dir`` from
                   construction.
+            encryption_key: Optional 64-character hex string for AES-256-GCM
+                  encryption. When provided, the snapshot is encrypted.
 
         Raises:
             KeyError: If the collection does not exist.
-            ValueError: If no path and no ``data_dir`` was set.
+            ValueError: If no path and no ``data_dir`` was set, or if
+                  encryption_key is invalid.
             RuntimeError: If the write fails.
         """
         ...
 
-    def load(self, name: str, path: str | None = None) -> None:
+    def load(self, name: str, path: str | None = None, encryption_key: str | None = None) -> None:
         """Load a collection snapshot from disk.
 
         The snapshot file is expected at ``<path>/<name>.vdb``.
@@ -295,10 +298,14 @@ class VectorDB:
             name: Collection name (matches the filename stem).
             path: Directory to load from. Falls back to ``data_dir`` from
                   construction.
+            encryption_key: Optional 64-character hex string for AES-256-GCM
+                  decryption. Required if the snapshot was saved encrypted.
 
         Raises:
-            ValueError: If no path and no ``data_dir`` was set.
-            RuntimeError: If the file doesn't exist or is corrupt.
+            ValueError: If no path and no ``data_dir`` was set, or if
+                  encryption_key is invalid.
+            RuntimeError: If the file doesn't exist, is corrupt, or
+                  decryption fails (wrong key or missing key for encrypted data).
         """
         ...
 

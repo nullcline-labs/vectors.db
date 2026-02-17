@@ -14,3 +14,5 @@ parking_lot = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
 crc32fast = { workspace = true }
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }

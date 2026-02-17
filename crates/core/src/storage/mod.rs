@@ -6,11 +6,14 @@
 
 /// Collection and database data structures.
 pub mod collection;
+/// AES-256-GCM encryption for snapshots and WAL entries.
+pub mod crypto;
 /// Disk persistence: snapshot save/load with atomic writes.
 pub mod persistence;
 /// Write-Ahead Log with CRC32 checksums.
 pub mod wal;
 
 pub use collection::{Collection, Database};
+pub use crypto::EncryptionKey;
 pub use persistence::{load_all_collections, load_collection, save_collection};
 pub use wal::{ReplayStats, SyncWriteAheadLog, WalEntry};

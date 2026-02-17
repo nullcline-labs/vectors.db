@@ -1,6 +1,6 @@
 # vectors.db Documentation
 
-A lightweight, high-performance, in-memory vector database written in Rust. Features HNSW approximate nearest neighbor search, BM25 full-text search, hybrid retrieval with Reciprocal Rank Fusion, scalar quantization for 4x memory reduction, Write-Ahead Log for crash recovery, automatic compaction of deleted nodes, Role-Based Access Control, Prometheus metrics, TLS support, and optional Raft-based multi-node clustering.
+A lightweight, high-performance, in-memory vector database written in Rust. Features HNSW approximate nearest neighbor search, BM25 full-text search, hybrid retrieval with Reciprocal Rank Fusion, scalar quantization for 4x memory reduction, Write-Ahead Log for crash recovery, AES-256-GCM encryption at rest, automatic compaction of deleted nodes, Role-Based Access Control, Prometheus metrics, TLS support, and optional Raft-based multi-node clustering.
 
 vectors.db can be used in two ways:
 
@@ -459,6 +459,7 @@ See the [`examples/`](examples/) directory for complete working scripts:
 | `--snapshot-interval` | | `300` | Automatic snapshot interval in seconds. `0` disables auto-snapshots. |
 | `--auto-compact-ratio` | | `0.2` | Rebuild indices when deleted nodes exceed this ratio (0.0 = disabled). Checked after each periodic snapshot. |
 | `--wal-strict` | | `false` | Fail startup if WAL replay encounters CRC errors, deserialization failures, or truncated entries. |
+| `--encryption-key-file` | | | Path to encryption key file (32 raw bytes or 64-char hex). Overrides `VECTORS_DB_ENCRYPTION_KEY`. |
 | `--shutdown-timeout` | | `30` | Graceful shutdown timeout in seconds. |
 | `--tls-cert` | | | Path to TLS certificate PEM file (requires `--tls-key`) |
 | `--tls-key` | | | Path to TLS private key PEM file (requires `--tls-cert`) |
@@ -471,6 +472,7 @@ See the [`examples/`](examples/) directory for complete working scripts:
 |----------|-------------|
 | `VECTORS_DB_API_KEY` | Single bearer token for API authentication. If unset, auth is disabled. |
 | `VECTORS_DB_API_KEYS` | JSON array for RBAC configuration (overrides `VECTORS_DB_API_KEY`). See [Authentication](#7-authentication--authorization). |
+| `VECTORS_DB_ENCRYPTION_KEY` | 64-character hex string (32 bytes) for AES-256-GCM encryption at rest. Overridden by `--encryption-key-file`. |
 | `RUST_LOG` | Log level filter (e.g., `vectors_db=info`, `vectors_db=debug`). |
 
 ### Example: Production startup
@@ -1073,6 +1075,47 @@ When documents are deleted, HNSW nodes are soft-deleted (marked but not removed)
 
 Auto-compaction runs in the background snapshot task and does not block search queries (Phase B runs without any lock). Manual compaction is also available via `POST /admin/rebuild/:name`.
 
+### Encryption at rest
+
+Snapshots and WAL entries can be encrypted with AES-256-GCM (authenticated encryption). This provides both confidentiality and integrity — the GCM authentication tag replaces CRC32 for encrypted data.
+
+**Key management:**
+
+1. **Key file** (recommended): `--encryption-key-file /path/to/key` — file contains 32 raw bytes or 64-char hex
+2. **Environment variable**: `VECTORS_DB_ENCRYPTION_KEY=<64-char-hex>`
+3. Key file takes precedence over environment variable
+4. No key = no encryption (backward compatible)
+
+**Encrypted snapshot format:**
+
+```
+[4 bytes: magic "VCE1"]
+[12 bytes: random nonce]
+[N bytes: AES-256-GCM ciphertext + 16-byte authentication tag]
+```
+
+**Encrypted WAL frame format:**
+
+```
+[4 bytes: payload length (big-endian u32)]
+[4 bytes: 0xFFFFFFFF sentinel (marks encrypted frame)]
+[12 bytes: random nonce]
+[N bytes: AES-256-GCM ciphertext + 16-byte authentication tag]
+```
+
+**Backward compatibility:**
+
+- Unencrypted files can be read even when an encryption key is configured
+- Encrypted files cannot be read without the correct key
+- Mixed WAL files (some plaintext, some encrypted entries) are supported during migration
+
+**Python library:**
+
+```python
+db.save("docs", path="./data", encryption_key="<64-char-hex>")
+db.load("docs", path="./data", encryption_key="<64-char-hex>")
+```
+
 ### Graceful shutdown
 
 On SIGINT or SIGTERM:
@@ -1241,6 +1284,13 @@ Internal error details (file paths, stack traces) are never exposed to API consu
 {"error": "Save operation failed"}
 {"error": "Internal error"}
 ```
+
+### Encryption at rest
+
+- **AES-256-GCM**: Authenticated encryption for snapshots and WAL entries
+- **Random nonces**: Each write uses a unique 12-byte random nonce (OS CSPRNG)
+- **Key zeroization**: Key material is zeroized in memory on drop
+- **No key in logs**: `EncryptionKey` debug output does not print key material
 
 ### File permissions (Unix)
 

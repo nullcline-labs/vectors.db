@@ -17,6 +17,8 @@ parking_lot = "0.12"
 rand = "0.8"
 tracing = "0.1"
 crc32fast = "1.4"
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
 
 # Server-only

@@ -15,6 +15,7 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 - **Hybrid search** combining vector + keyword via RRF or linear fusion
 - **Scalar quantization** (f32 -> u8) for memory-efficient SIMD-friendly storage, with optional raw f32 vectors for maximum recall
 - **Write-Ahead Log (WAL)** with CRC32 checksums and fsync for crash recovery
+- **Encryption at rest** — AES-256-GCM for snapshots and WAL, with key file or env var
 - **Auto-compaction** — automatic index rebuild when deleted nodes exceed a configurable threshold (default 20%)
 - **Bearer token authentication** via `VECTORS_DB_API_KEY`
 - **Prometheus metrics** at `/metrics`
@@ -165,6 +166,7 @@ POST /collections/:name/search
 | Variable | Description |
 |----------|-------------|
 | `VECTORS_DB_API_KEY` | Bearer token for API authentication. If unset, auth is disabled. |
+| `VECTORS_DB_ENCRYPTION_KEY` | 64-character hex string (32 bytes) for AES-256-GCM encryption at rest. |
 | `RUST_LOG` | Log level filter (e.g., `vectors_db=info`) |
 
 ### CLI Arguments
@@ -175,6 +177,7 @@ POST /collections/:name/search
 | `--data-dir`, `-d` | `./data` | Directory for WAL and snapshots |
 | `--snapshot-interval` | 300 | Auto-snapshot interval in seconds (0 = disabled) |
 | `--auto-compact-ratio` | 0.2 | Rebuild indices when >N% of nodes are deleted (0.0 = disabled) |
+| `--encryption-key-file` | — | Path to encryption key file (32 raw bytes or 64-char hex). Overrides env var. |
 | `--wal-strict` | false | Fail startup if WAL replay encounters errors |
 
 ## Architecture

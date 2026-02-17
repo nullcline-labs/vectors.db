@@ -22,6 +22,7 @@ use vectorsdb_core::config;
 use vectorsdb_core::document::Document;
 use vectorsdb_core::hnsw::distance::DistanceMetric;
 use vectorsdb_core::hnsw::graph::HnswConfig;
+use vectorsdb_core::storage::crypto::EncryptionKey;
 use vectorsdb_core::storage::wal::WalEntry;
 use vectorsdb_core::storage::{save_collection, Database};
 
@@ -45,6 +46,8 @@ pub struct AppState {
     /// Tracks in-flight memory reservations from concurrent write requests.
     /// Prevents multiple requests from collectively exceeding the memory limit.
     pub memory_reserved: Arc<AtomicUsize>,
+    /// Optional encryption key for encrypted snapshots and WAL.
+    pub encryption_key: Option<Arc<EncryptionKey>>,
 }
 
 fn validate_embedding(embedding: &[f32]) -> Result<(), ApiError> {
@@ -800,7 +803,12 @@ pub async fn save(
         .get_collection(&name)
         .ok_or_else(|| ApiError::NotFound(format!("Collection '{}' not found", name)))?;
 
-    save_collection(&collection, &state.data_dir).map_err(|e| {
+    save_collection(
+        &collection,
+        &state.data_dir,
+        state.encryption_key.as_deref(),
+    )
+    .map_err(|e| {
         tracing::error!("Failed to save collection: {}", e);
         ApiError::Internal("Save operation failed".into())
     })?;
@@ -823,10 +831,13 @@ pub async fn load(
         )));
     }
 
-    let collection = vectorsdb_core::storage::load_collection(&path).map_err(|e| {
-        tracing::error!("Failed to load collection: {}", e);
-        ApiError::Internal("Load operation failed".into())
-    })?;
+    let collection =
+        vectorsdb_core::storage::load_collection(&path, state.encryption_key.as_deref()).map_err(
+            |e| {
+                tracing::error!("Failed to load collection: {}", e);
+                ApiError::Internal("Load operation failed".into())
+            },
+        )?;
 
     let mut collections = state.db.collections.write();
     collections.insert(name.clone(), collection);
@@ -841,10 +852,12 @@ pub async fn compact(State(state): State<AppState>) -> Result<Json<MessageRespon
     let _gate = state.wal.freeze();
     let collections = state.db.collections.read();
     for (name, collection) in collections.iter() {
-        save_collection(collection, &state.data_dir).map_err(|e| {
-            tracing::error!("Failed to save '{}': {}", name, e);
-            ApiError::Internal("Save operation failed".into())
-        })?;
+        save_collection(collection, &state.data_dir, state.encryption_key.as_deref()).map_err(
+            |e| {
+                tracing::error!("Failed to save '{}': {}", name, e);
+                ApiError::Internal("Save operation failed".into())
+            },
+        )?;
     }
     let count = collections.len();
     drop(collections);
@@ -1027,10 +1040,12 @@ pub async fn backup(State(state): State<AppState>) -> Result<Json<BackupResponse
     let collections = state.db.collections.read();
     let mut files = Vec::new();
     for (name, collection) in collections.iter() {
-        save_collection(collection, &state.data_dir).map_err(|e| {
-            tracing::error!("Failed to save '{}': {}", name, e);
-            ApiError::Internal("Save operation failed".into())
-        })?;
+        save_collection(collection, &state.data_dir, state.encryption_key.as_deref()).map_err(
+            |e| {
+                tracing::error!("Failed to save '{}': {}", name, e);
+                ApiError::Internal("Save operation failed".into())
+            },
+        )?;
         files.push(format!("{}.vdb", name));
     }
     Ok(Json(BackupResponse {
@@ -1137,7 +1152,11 @@ pub async fn clear_collection(
 
 /// `POST /admin/restore`
 pub async fn restore_all(State(state): State<AppState>) -> Result<Json<RestoreResponse>, ApiError> {
-    let loaded = vectorsdb_core::storage::load_all_collections(&state.data_dir).map_err(|e| {
+    let loaded = vectorsdb_core::storage::load_all_collections(
+        &state.data_dir,
+        state.encryption_key.as_deref(),
+    )
+    .map_err(|e| {
         tracing::error!("Failed to load collections: {}", e);
         ApiError::Internal("Restore operation failed".into())
     })?;
