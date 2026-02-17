@@ -69,6 +69,24 @@ async fn auth_middleware(
             )));
         }
 
+        // Collection-scoped access control (Admin keys bypass)
+        let allowed_collections = if role >= rbac::Role::Admin {
+            None
+        } else {
+            rbac.get_collections(&token).cloned()
+        };
+
+        if let Some(ref patterns) = allowed_collections {
+            if let Some(col_name) = extract_collection_from_path(&path) {
+                if !rbac::collection_matches(patterns, col_name) {
+                    return Err(ApiError::Forbidden(format!(
+                        "Access denied to collection '{}'",
+                        col_name
+                    )));
+                }
+            }
+        }
+
         // Per-key rate limiting
         let key_prefix = audit::mask_key(&token);
         if let Some(rps) = rbac.get_rate_limit(&token) {
@@ -87,6 +105,7 @@ async fn auth_middleware(
             key_prefix,
             role: Some(role),
             client_ip,
+            allowed_collections,
         });
         return Ok(next.run(req).await);
     }
@@ -113,6 +132,7 @@ async fn auth_middleware(
             key_prefix,
             role: None,
             client_ip,
+            allowed_collections: None,
         });
     } else {
         // No auth mode
@@ -120,6 +140,7 @@ async fn auth_middleware(
             key_prefix: "anonymous".to_string(),
             role: None,
             client_ip,
+            allowed_collections: None,
         });
     }
     Ok(next.run(req).await)
@@ -178,6 +199,16 @@ async fn metrics_middleware(
 }
 
 use axum::extract::State;
+
+/// Extract the collection name from a URL path like `/collections/:name/...`.
+fn extract_collection_from_path(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() >= 3 && segments[1] == "collections" && !segments[2].is_empty() {
+        Some(segments[2])
+    } else {
+        None
+    }
+}
 
 /// Builds the Axum router with all routes and middleware layers.
 pub fn create_router(state: AppState) -> Router {

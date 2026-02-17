@@ -19,7 +19,7 @@ A lightweight, in-memory vector database with HNSW indexing, BM25 full-text sear
 - **Auto-compaction** — automatic index rebuild when deleted nodes exceed a configurable threshold (default 20%)
 - **WAL streaming replication** — active-passive HA with automatic snapshot sync and real-time WAL streaming
 - **Structured audit logging** — WHO/WHAT/WHEN for all mutations, filterable via `RUST_LOG=audit=info`
-- **Bearer token authentication** via `VECTORS_DB_API_KEY`
+- **RBAC with collection-scoped multi-tenancy** — Read/Write/Admin roles with optional per-key collection restrictions
 - **Prometheus metrics** at `/metrics` with prebuilt **Grafana dashboard**
 - **Request timeout** (30s) and **rate limiting** (100 req/s)
 - **Batch insert** up to 1000 documents per request
@@ -180,9 +180,27 @@ POST /collections/:name/search
 
 | Variable | Description |
 |----------|-------------|
-| `VECTORS_DB_API_KEY` | Bearer token for API authentication. If unset, auth is disabled. |
+| `VECTORS_DB_API_KEY` | Single bearer token for API authentication. If unset, auth is disabled. |
+| `VECTORS_DB_API_KEYS` | JSON array for RBAC with optional collection scoping. See below. |
 | `VECTORS_DB_ENCRYPTION_KEY` | 64-character hex string (32 bytes) for AES-256-GCM encryption at rest. |
 | `RUST_LOG` | Log level filter (e.g., `vectorsdb_server=info`, `audit=info` for audit events) |
+
+### Multi-Tenant RBAC
+
+Use `VECTORS_DB_API_KEYS` to assign roles and restrict keys to specific collections:
+
+```bash
+VECTORS_DB_API_KEYS='[
+  {"key": "admin-key", "role": "admin"},
+  {"key": "tenant-a", "role": "write", "collections": ["tenantA_*"]},
+  {"key": "reader", "role": "read", "collections": ["public", "shared_*"]}
+]'
+```
+
+- **Roles**: `read` < `write` < `admin` (each inherits lower permissions)
+- **`collections`** (optional): restricts the key to collections matching the listed patterns. Supports exact names (`"public"`) and prefix globs (`"tenantA_*"`). Omit for unrestricted access.
+- **Admin bypass**: Admin keys always have full access regardless of `collections`.
+- `GET /collections` is filtered to only show accessible collections for scoped keys.
 
 ### CLI Arguments
 

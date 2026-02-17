@@ -18,6 +18,8 @@ pub struct AuditContext {
     pub role: Option<Role>,
     /// Client IP from `X-Forwarded-For` / `X-Real-IP` headers, or "-".
     pub client_ip: String,
+    /// Allowed collection patterns for this key. `None` means unrestricted access.
+    pub allowed_collections: Option<Vec<String>>,
 }
 
 /// Mask an API key for safe logging: first 8 chars + "...".
@@ -168,6 +170,7 @@ mod tests {
             key_prefix: "abc12345...".to_string(),
             role: Some(Role::Write),
             client_ip: "10.0.0.1".to_string(),
+            allowed_collections: None,
         };
         let ctx2 = ctx.clone();
         assert_eq!(ctx.key_prefix, ctx2.key_prefix);
@@ -181,6 +184,7 @@ mod tests {
             key_prefix: "anonymous".to_string(),
             role: None,
             client_ip: "-".to_string(),
+            allowed_collections: None,
         };
         let debug = format!("{:?}", ctx);
         assert!(debug.contains("anonymous"));
@@ -195,6 +199,7 @@ mod tests {
             key_prefix: "testkey1...".to_string(),
             role: Some(Role::Admin),
             client_ip: "127.0.0.1".to_string(),
+            allowed_collections: None,
         };
         // Should not panic regardless of subscriber
         audit_event(
@@ -212,6 +217,7 @@ mod tests {
             key_prefix: "anonymous".to_string(),
             role: None,
             client_ip: "-".to_string(),
+            allowed_collections: None,
         };
         audit_event(&ctx, "search", "my_col", "mode=vector,k=10", "success");
     }
@@ -222,6 +228,7 @@ mod tests {
             key_prefix: "abc12345...".to_string(),
             role: Some(Role::Write),
             client_ip: "10.0.0.1".to_string(),
+            allowed_collections: None,
         };
         audit_event(&ctx, "delete_collection", "test_col", "", "success");
     }
@@ -300,6 +307,7 @@ mod tests {
                 key_prefix: "mykey123...".to_string(),
                 role: Some(Role::Write),
                 client_ip: "192.168.1.100".to_string(),
+                allowed_collections: None,
             };
             audit_event(
                 &ctx,
@@ -355,6 +363,7 @@ mod tests {
                 key_prefix: "test...".to_string(),
                 role: None,
                 client_ip: "-".to_string(),
+                allowed_collections: None,
             };
             audit_event(&ctx, "test_action", "test_resource", "", "success");
         });

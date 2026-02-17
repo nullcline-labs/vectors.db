@@ -64,6 +64,25 @@ fn check_standby(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Reject requests when the caller's API key is collection-scoped and
+/// the target collection does not match the allowed patterns.
+fn check_collection_access(
+    audit_ctx: &Option<Extension<AuditContext>>,
+    name: &str,
+) -> Result<(), ApiError> {
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        if let Some(ref patterns) = ctx.allowed_collections {
+            if !crate::api::rbac::collection_matches(patterns, name) {
+                return Err(ApiError::Forbidden(format!(
+                    "Access denied to collection '{}'",
+                    name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_embedding(embedding: &[f32]) -> Result<(), ApiError> {
     if embedding.iter().any(|&v| v.is_nan() || v.is_infinite()) {
         return Err(ApiError::BadRequest("Embedding contains NaN or Inf".into()));
@@ -204,6 +223,7 @@ pub async fn create_collection(
 ) -> Result<Json<CreateCollectionResponse>, ApiError> {
     check_standby(&state)?;
     validate_collection_name(&req.name)?;
+    check_collection_access(&audit_ctx, &req.name)?;
 
     if req.dimension == 0 || req.dimension > config::MAX_DIMENSION {
         return Err(ApiError::BadRequest(format!(
@@ -292,9 +312,12 @@ pub async fn create_collection(
 }
 
 /// `GET /collections`
-pub async fn list_collections(State(state): State<AppState>) -> Json<Vec<CollectionInfo>> {
+pub async fn list_collections(
+    State(state): State<AppState>,
+    audit_ctx: Option<Extension<AuditContext>>,
+) -> Json<Vec<CollectionInfo>> {
     let collections = state.db.collections.read();
-    let infos: Vec<CollectionInfo> = collections
+    let mut infos: Vec<CollectionInfo> = collections
         .values()
         .map(|c| {
             let data = c.data.read();
@@ -304,6 +327,14 @@ pub async fn list_collections(State(state): State<AppState>) -> Json<Vec<Collect
             }
         })
         .collect();
+
+    // Filter by allowed collections if the key is collection-scoped
+    if let Some(Extension(ref ctx)) = audit_ctx {
+        if let Some(ref patterns) = ctx.allowed_collections {
+            infos.retain(|c| crate::api::rbac::collection_matches(patterns, &c.name));
+        }
+    }
+
     Json(infos)
 }
 

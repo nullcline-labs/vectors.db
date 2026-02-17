@@ -518,7 +518,7 @@ See the [`examples/`](examples/) directory for complete working scripts:
 ```bash
 VECTORS_DB_API_KEYS='[
   {"key":"admin-key-xxx","role":"admin"},
-  {"key":"app-key-yyy","role":"write","rate_limit_rps":100},
+  {"key":"app-key-yyy","role":"write","rate_limit_rps":100,"collections":["app_*"]},
   {"key":"search-key-zzz","role":"read","rate_limit_rps":500}
 ]' \
 RUST_LOG=vectors_db=info \
@@ -1008,12 +1008,66 @@ Each role inherits all permissions from lower roles. A `Write` key can do everyt
 
 Optional `rate_limit_rps` field sets a per-key rate limit (requests per second) using a token bucket algorithm. Keys without this field use the global rate limit (100 req/s default).
 
+### Collection-Scoped Access Control (Multi-Tenancy)
+
+Each API key can optionally be restricted to specific collections via the `collections` field. This enables multi-tenant isolation on a single database instance.
+
+```bash
+VECTORS_DB_API_KEYS='[
+  {"key": "admin-key", "role": "admin"},
+  {"key": "tenant-a-key", "role": "write", "collections": ["tenantA_*"]},
+  {"key": "tenant-b-key", "role": "write", "collections": ["tenantB_*"]},
+  {"key": "shared-reader", "role": "read", "collections": ["public", "shared_*"]}
+]'
+```
+
+**Pattern matching:**
+
+| Pattern | Matches | Does not match |
+|---------|---------|----------------|
+| `"public"` | `public` | `public_extra`, `other` |
+| `"tenant_*"` | `tenant_foo`, `tenant_bar`, `tenant_` | `other`, `tenan` |
+| `"*"` | everything | — |
+
+**Behavior:**
+
+- **`collections` omitted or `null`**: unrestricted access to all collections (default, backward compatible)
+- **`collections` set**: the key can only access collections whose names match at least one pattern
+- **Admin bypass**: Admin keys always have full access, even if `collections` is set
+- **`GET /collections`**: returns only collections the key is allowed to access
+- **`POST /collections`**: the new collection name must match the key's patterns
+- **All other collection routes** (`/collections/:name/...`): access is checked in the auth middleware before the request reaches the handler
+
+**Example: two tenants on a shared instance**
+
+```bash
+# Tenant A creates and uses their collections
+curl -X POST http://localhost:3030/collections \
+  -H "Authorization: Bearer tenant-a-key" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "tenantA_docs", "dimension": 768}'
+# ✓ 200 OK (matches tenantA_*)
+
+curl -X POST http://localhost:3030/collections/tenantA_docs/documents \
+  -H "Authorization: Bearer tenant-a-key" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "hello", "embedding": [0.1, ...]}'
+# ✓ 200 OK
+
+# Tenant A cannot access Tenant B's collections
+curl -X POST http://localhost:3030/collections/tenantB_docs/search \
+  -H "Authorization: Bearer tenant-a-key" \
+  -H "Content-Type: application/json" \
+  -d '{"query_text": "hello", "k": 5}'
+# ✗ 403 Forbidden: "Access denied to collection 'tenantB_docs'"
+```
+
 ### Error responses
 
 | Status | Meaning |
 |--------|---------|
 | 401 Unauthorized | Missing or invalid `Authorization: Bearer <token>` header |
-| 403 Forbidden | Valid token but insufficient role for the endpoint |
+| 403 Forbidden | Valid token but insufficient role, or collection access denied by scoping |
 | 429 Too Many Requests | Per-key rate limit exceeded |
 
 ---

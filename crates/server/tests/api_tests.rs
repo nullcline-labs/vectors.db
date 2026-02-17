@@ -977,11 +977,13 @@ async fn test_rbac_read_only() {
             key: "read-key".to_string(),
             role: Role::Read,
             rate_limit_rps: None,
+            collections: None,
         },
         ApiKeyEntry {
             key: "admin-key".to_string(),
             role: Role::Admin,
             rate_limit_rps: None,
+            collections: None,
         },
     ]);
     let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
@@ -1010,6 +1012,7 @@ async fn test_rbac_write_role() {
         key: "write-key".to_string(),
         role: Role::Write,
         rate_limit_rps: None,
+        collections: None,
     }]);
     let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
 
@@ -1037,6 +1040,7 @@ async fn test_rbac_admin_role() {
         key: "admin-key".to_string(),
         role: Role::Admin,
         rate_limit_rps: None,
+        collections: None,
     }]);
     let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
 
@@ -1690,11 +1694,13 @@ async fn test_audit_context_flows_in_rbac_mode() {
             key: "write-key-abcdefghij".to_string(),
             role: Role::Write,
             rate_limit_rps: None,
+            collections: None,
         },
         ApiKeyEntry {
             key: "admin-key-abcdefghij".to_string(),
             role: Role::Admin,
             rate_limit_rps: None,
+            collections: None,
         },
     ]);
     let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
@@ -1850,4 +1856,469 @@ async fn test_audit_restore_flow() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+// ── Collection-scoped RBAC tests ─────────────────────────────────
+
+#[tokio::test]
+async fn test_collection_scoped_access_allowed() {
+    let rbac = RbacConfig::from_entries(vec![
+        ApiKeyEntry {
+            key: "admin-key".to_string(),
+            role: Role::Admin,
+            rate_limit_rps: None,
+            collections: None,
+        },
+        ApiKeyEntry {
+            key: "tenant-a".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+            collections: Some(vec!["a_*".to_string()]),
+        },
+    ]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Admin creates collection
+    client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer admin-key")
+        .json(&serde_json::json!({"name": "a_docs", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+
+    // Tenant-a can insert into a_docs
+    let resp = client()
+        .post(format!("{}/collections/a_docs/documents", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({"text": "hello", "embedding": [1.0, 0.0, 0.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Tenant-a can search a_docs
+    let resp = client()
+        .post(format!("{}/collections/a_docs/search", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({"query_embedding": [1.0, 0.0, 0.0], "k": 5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_access_denied() {
+    let rbac = RbacConfig::from_entries(vec![
+        ApiKeyEntry {
+            key: "admin-key".to_string(),
+            role: Role::Admin,
+            rate_limit_rps: None,
+            collections: None,
+        },
+        ApiKeyEntry {
+            key: "tenant-a".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+            collections: Some(vec!["a_*".to_string()]),
+        },
+    ]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Admin creates collection b_docs
+    client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer admin-key")
+        .json(&serde_json::json!({"name": "b_docs", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+
+    // Tenant-a cannot insert into b_docs
+    let resp = client()
+        .post(format!("{}/collections/b_docs/documents", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({"text": "hello", "embedding": [1.0, 0.0, 0.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Tenant-a cannot search b_docs
+    let resp = client()
+        .post(format!("{}/collections/b_docs/search", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({"query_embedding": [1.0, 0.0, 0.0], "k": 5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Tenant-a cannot delete b_docs
+    let resp = client()
+        .delete(format!("{}/collections/b_docs", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_admin_bypass() {
+    let rbac = RbacConfig::from_entries(vec![ApiKeyEntry {
+        key: "admin-key".to_string(),
+        role: Role::Admin,
+        rate_limit_rps: None,
+        collections: Some(vec!["restricted_*".to_string()]),
+    }]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Admin can create any collection, even with collections field set
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer admin-key")
+        .json(&serde_json::json!({"name": "anything", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_list_filtered() {
+    let rbac = RbacConfig::from_entries(vec![
+        ApiKeyEntry {
+            key: "admin-key".to_string(),
+            role: Role::Admin,
+            rate_limit_rps: None,
+            collections: None,
+        },
+        ApiKeyEntry {
+            key: "tenant-a".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+            collections: Some(vec!["a_*".to_string()]),
+        },
+    ]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Admin creates two collections
+    for name in &["a_docs", "b_docs"] {
+        client()
+            .post(format!("{}/collections", base_url))
+            .header("Authorization", "Bearer admin-key")
+            .json(&serde_json::json!({"name": name, "dimension": 3}))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Admin sees both
+    let resp = client()
+        .get(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer admin-key")
+        .send()
+        .await
+        .unwrap();
+    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(body.len(), 2);
+
+    // Tenant-a only sees a_docs
+    let resp = client()
+        .get(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .send()
+        .await
+        .unwrap();
+    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(body.len(), 1);
+    assert_eq!(body[0]["name"], "a_docs");
+}
+
+#[tokio::test]
+async fn test_collection_scoped_create_denied() {
+    let rbac = RbacConfig::from_entries(vec![ApiKeyEntry {
+        key: "tenant-a".to_string(),
+        role: Role::Write,
+        rate_limit_rps: None,
+        collections: Some(vec!["a_*".to_string()]),
+    }]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Tenant-a cannot create b_docs
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({"name": "b_docs", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Tenant-a can create a_docs (matches a_*)
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({"name": "a_docs", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_exact_match() {
+    let rbac = RbacConfig::from_entries(vec![ApiKeyEntry {
+        key: "reader".to_string(),
+        role: Role::Read,
+        rate_limit_rps: None,
+        collections: Some(vec!["public".to_string(), "shared".to_string()]),
+    }]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Reader can search "public" (exact match) — but collection doesn't exist → 404 not 403
+    let resp = client()
+        .post(format!("{}/collections/public/search", base_url))
+        .header("Authorization", "Bearer reader")
+        .json(&serde_json::json!({"query_text": "test", "k": 5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404); // collection not found, not forbidden
+
+    // Reader cannot access "private"
+    let resp = client()
+        .post(format!("{}/collections/private/search", base_url))
+        .header("Authorization", "Bearer reader")
+        .json(&serde_json::json!({"query_text": "test", "k": 5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_unscoped_key_has_full_access() {
+    let rbac = RbacConfig::from_entries(vec![
+        ApiKeyEntry {
+            key: "unscoped".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+            collections: None,
+        },
+        ApiKeyEntry {
+            key: "scoped".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+            collections: Some(vec!["a_*".to_string()]),
+        },
+    ]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Unscoped key can create any collection
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer unscoped")
+        .json(&serde_json::json!({"name": "anything", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Unscoped key can access it
+    let resp = client()
+        .post(format!("{}/collections/anything/documents", base_url))
+        .header("Authorization", "Bearer unscoped")
+        .json(&serde_json::json!({"text": "hello", "embedding": [1.0, 0.0, 0.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Scoped key cannot access it
+    let resp = client()
+        .post(format!("{}/collections/anything/documents", base_url))
+        .header("Authorization", "Bearer scoped")
+        .json(&serde_json::json!({"text": "hello", "embedding": [1.0, 0.0, 0.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_batch_insert_denied() {
+    let rbac = RbacConfig::from_entries(vec![
+        ApiKeyEntry {
+            key: "admin-key".to_string(),
+            role: Role::Admin,
+            rate_limit_rps: None,
+            collections: None,
+        },
+        ApiKeyEntry {
+            key: "tenant-a".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+            collections: Some(vec!["a_*".to_string()]),
+        },
+    ]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Admin creates b_docs
+    client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer admin-key")
+        .json(&serde_json::json!({"name": "b_docs", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+
+    // Tenant-a cannot batch insert into b_docs
+    let resp = client()
+        .post(format!("{}/collections/b_docs/documents/batch", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({
+            "documents": [
+                {"text": "doc1", "embedding": [1.0, 0.0, 0.0]},
+                {"text": "doc2", "embedding": [0.0, 1.0, 0.0]}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_get_update_stats_denied() {
+    let rbac = RbacConfig::from_entries(vec![
+        ApiKeyEntry {
+            key: "admin-key".to_string(),
+            role: Role::Admin,
+            rate_limit_rps: None,
+            collections: None,
+        },
+        ApiKeyEntry {
+            key: "tenant-a".to_string(),
+            role: Role::Write,
+            rate_limit_rps: None,
+            collections: Some(vec!["a_*".to_string()]),
+        },
+    ]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Admin creates b_docs and inserts a document
+    client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer admin-key")
+        .json(&serde_json::json!({"name": "b_docs", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client()
+        .post(format!("{}/collections/b_docs/documents", base_url))
+        .header("Authorization", "Bearer admin-key")
+        .json(&serde_json::json!({"text": "hello", "embedding": [1.0, 0.0, 0.0]}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let doc_id = body["id"].as_str().unwrap();
+
+    // Tenant-a cannot GET document from b_docs
+    let resp = client()
+        .get(format!(
+            "{}/collections/b_docs/documents/{}",
+            base_url, doc_id
+        ))
+        .header("Authorization", "Bearer tenant-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Tenant-a cannot GET stats for b_docs
+    let resp = client()
+        .get(format!("{}/collections/b_docs/stats", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Tenant-a cannot GET document count for b_docs
+    let resp = client()
+        .get(format!("{}/collections/b_docs/documents/count", base_url))
+        .header("Authorization", "Bearer tenant-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Tenant-a cannot PUT (update) document in b_docs
+    let resp = client()
+        .put(format!(
+            "{}/collections/b_docs/documents/{}",
+            base_url, doc_id
+        ))
+        .header("Authorization", "Bearer tenant-a")
+        .json(&serde_json::json!({"text": "hacked"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_collection_scoped_multiple_patterns() {
+    let rbac = RbacConfig::from_entries(vec![ApiKeyEntry {
+        key: "multi".to_string(),
+        role: Role::Write,
+        rate_limit_rps: None,
+        collections: Some(vec!["alpha_*".to_string(), "beta".to_string()]),
+    }]);
+    let (base_url, _tmp) = spawn_app_full(None, Some(rbac), 0).await;
+
+    // Can create alpha_foo (matches glob)
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer multi")
+        .json(&serde_json::json!({"name": "alpha_foo", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Can create beta (exact match)
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer multi")
+        .json(&serde_json::json!({"name": "beta", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Cannot create gamma (no match)
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer multi")
+        .json(&serde_json::json!({"name": "gamma", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // Cannot create beta_extra (not exact match, no glob)
+    let resp = client()
+        .post(format!("{}/collections", base_url))
+        .header("Authorization", "Bearer multi")
+        .json(&serde_json::json!({"name": "beta_extra", "dimension": 3}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
 }
