@@ -14,4 +14,12 @@ __pycache__/
 *.so
 .pytest_cache/
 .venv/
-crates/python/
+crates/python/src/
+crates/python/tests/
+crates/python/vectorsdb/
+
+# Test/dev data
+data-primary/
+data-standby/
+data/
+*.vdb
