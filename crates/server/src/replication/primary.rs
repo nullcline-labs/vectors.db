@@ -131,10 +131,7 @@ async fn send_snapshots<W: AsyncWriteExt + Unpin>(
 
         // Save snapshot to disk (reuse existing persistence), then read bytes
         save_collection(&collection, data_dir, None).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("snapshot save for '{}' failed: {}", name, e),
-            )
+            std::io::Error::other(format!("snapshot save for '{}' failed: {}", name, e))
         })?;
 
         let snapshot_path = std::path::Path::new(data_dir).join(format!("{}.vdb", name));
